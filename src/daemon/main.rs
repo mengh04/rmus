@@ -16,6 +16,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+#[cfg(target_os = "linux")]
+mod mpris;
+
 #[derive(Parser)]
 #[command(name = "rmusd", version, about = "rmus 播放守护进程")]
 struct Args {
@@ -48,6 +51,13 @@ fn main() -> Result<()> {
             format!("监听 {} 失败", sock.display())
         })?;
         println!("rmusd 监听于 {}", sock.display());
+
+        // MPRIS：桌面媒体控制/媒体键/播放器小组件（可选，无 D-Bus 时降级警告）
+        #[cfg(target_os = "linux")]
+        match mpris::spawn(cmd_tx.clone(), events_tx.subscribe()).await {
+            Ok(()) => println!("MPRIS: org.mpris.MediaPlayer2.rmus"),
+            Err(e) => eprintln!("[rmusd] MPRIS 服务不可用（无桌面会话？）: {e:#}"),
+        }
 
         // 信号处理：退出时清理 socket 文件
         let sock_for_cleanup = sock.clone();

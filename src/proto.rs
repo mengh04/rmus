@@ -40,7 +40,7 @@ pub struct TrackInfo {
     pub duration_ms: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StatusInfo {
     pub state: PlayState,
     /// 当前曲在队列中的下标（stop 后仍保留最后一曲）

@@ -38,6 +38,13 @@ serde_json = "1"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# MPRIS（D-Bus 媒体播放器接口，系统媒体控制/键盘媒体键/播放器小组件）
+mpris-server = "0.10"
+zbus = "5"
+async-trait = "0.1"
+url = "2"
+
 [profile.release]
 opt-level = "s"
 lto = "thin"
