@@ -48,6 +48,12 @@ pub enum ToEngine {
         items: Vec<QueueItem>,
         reply: oneshot::Sender<Result<Reply, String>>,
     },
+    /// daemon 层完成扫描后进入试听态（临时队列）
+    PeekScanned {
+        id: u64,
+        items: Vec<QueueItem>,
+        reply: oneshot::Sender<Result<Reply, String>>,
+    },
     /// daemon 层完成扫描后追加到命名队列
     PlaylistAddScanned {
         id: u64,
@@ -67,6 +73,18 @@ pub enum ToEngine {
 struct DecoderHandle {
     generation: u64,
     handle: JoinHandle<()>,
+}
+
+/// 试听态存档：进入 peek 时的完整播放状态，restore 时原样恢复
+struct PeekSnapshot {
+    queue: Queue,
+    queue_name: Option<String>,
+    /// 存档时的播放进度（毫秒）。必须在换队列（输出流 reset 清零帧计数）前取
+    position_ms: u64,
+    /// 恢复后回到的状态：Playing 继续播，Paused 停在原进度
+    state: PlayState,
+    repeat: RepeatMode,
+    random: bool,
 }
 
 pub struct Engine {
@@ -92,6 +110,8 @@ pub struct Engine {
     /// 连续解码失败计数；达到队列长度即认为整队列都播不了，停止
     fatal_streak: usize,
     last_position_event: Instant,
+    /// 试听态存档；Some = 当前队列是临时的
+    peek: Option<PeekSnapshot>,
 }
 
 impl Engine {
@@ -135,6 +155,7 @@ impl Engine {
             to_engine_tx,
             dirty: false,
             fatal_streak: 0,
+            peek: None,
             last_position_event: Instant::now()
                 - POSITION_EVENT_INTERVAL, // 首个事件立即发
         })
@@ -168,6 +189,8 @@ impl Engine {
                         let _ = reply.send(Err("没有找到可播放的音频文件".into()));
                         continue;
                     }
+                    // 显式换队列 = 放弃试听恢复点
+                    self.peek = None;
                     self.kill_decoder();
                     self.queue.items = items;
                     self.queue.current = None;
@@ -175,6 +198,14 @@ impl Engine {
                     self.dirty = true;
                     self.emit(Event::QueueChanged);
                     self.start_track(0, 0, true);
+                    let _ = reply.send(Ok(Reply::Status(Box::new(self.status()))));
+                }
+                Ok(ToEngine::PeekScanned { items, reply, .. }) => {
+                    if items.is_empty() {
+                        let _ = reply.send(Err("没有找到可播放的音频文件".into()));
+                        continue;
+                    }
+                    self.enter_peek(items);
                     let _ = reply.send(Ok(Reply::Status(Box::new(self.status()))));
                 }
                 Ok(ToEngine::PlaylistAddScanned {
@@ -212,9 +243,9 @@ impl Engine {
                         self.fatal_streak += 1;
                         let limit = self.queue.len().max(1);
                         if self.fatal_streak >= limit {
-                            // 整个队列挨个试过都失败：停止，避免循环重试烧 CPU
+                            // 整个队列挨个试过都失败：停止（试听态则恢复），避免循环重试烧 CPU
                             eprintln!("[rmusd] 队列连续 {limit} 首无法播放，停止播放");
-                            self.stop();
+                            self.finish_or_restore();
                         } else {
                             self.on_eof();
                         }
@@ -373,6 +404,8 @@ impl Engine {
                     return Err(format!("队列 {name} 是空的"));
                 }
                 let items = items.clone();
+                // 显式换队列 = 放弃试听恢复点
+                self.peek = None;
                 self.kill_decoder();
                 self.queue.items = items;
                 self.queue.current = None;
@@ -414,9 +447,17 @@ impl Engine {
                 });
                 Ok(Reply::Status(Box::new(self.status())))
             }
-            // Add/Open/PlaylistAdd 由 daemon 层拦截扫描，不应到达这里
+            Request::Back => match self.peek.as_ref() {
+                Some(_) => {
+                    self.restore();
+                    Ok(Reply::Status(Box::new(self.status())))
+                }
+                None => Err("当前没有试听在等待恢复".into()),
+            },
+            // Add/Open/PlaylistAdd/Peek 由 daemon 层拦截扫描，不应到达这里
             Request::Add { .. } => Err("内部错误：Add 未在 daemon 层处理".into()),
             Request::Open { .. } => Err("内部错误：Open 未在 daemon 层处理".into()),
+            Request::Peek { .. } => Err("内部错误：Peek 未在 daemon 层处理".into()),
             Request::PlaylistAdd { .. } => {
                 Err("内部错误：PlaylistAdd 未在 daemon 层处理".into())
             }
@@ -479,7 +520,82 @@ impl Engine {
         let wrap = self.repeat == RepeatMode::All;
         match self.pick_next(wrap) {
             Some(i) => self.start_track(i, 0, true),
-            None => self.stop(),
+            None => self.finish_or_restore(),
+        }
+    }
+
+    /// 播放自然结束：试听态下恢复原队列，否则停止
+    fn finish_or_restore(&mut self) {
+        if self.peek.is_some() {
+            self.restore();
+        } else {
+            self.stop();
+        }
+    }
+
+    /// 进入试听：首次调用时存档当前状态，然后换成临时队列从头播放。
+    /// 已在试听态时只换临时队列（原存档保持不变）。
+    fn enter_peek(&mut self, items: Vec<QueueItem>) {
+        if self.peek.is_none() {
+            // position_ms 必须在换队列前取：start_track 的 reset 会清零帧计数
+            let position_ms = self.position_ms();
+            let snapshot = PeekSnapshot {
+                queue: std::mem::take(&mut self.queue),
+                queue_name: self.queue_name.take(),
+                position_ms,
+                state: self.state,
+                repeat: self.repeat,
+                random: self.random,
+            };
+            self.peek = Some(snapshot);
+        }
+        self.kill_decoder();
+        self.queue.items = items;
+        self.queue.current = None;
+        self.queue_name = None;
+        // 临时队列固定顺序播放，循环/随机语义留给恢复后的原队列
+        self.repeat = RepeatMode::Off;
+        self.random = false;
+        self.dirty = true;
+        self.emit(Event::QueueChanged);
+        self.emit(Event::ModeChanged {
+            repeat: self.repeat,
+            random: self.random,
+        });
+        self.start_track(0, 0, true);
+    }
+
+    /// 结束试听：恢复存档的队列、模式与进度。
+    fn restore(&mut self) {
+        let Some(snap) = self.peek.take() else {
+            return;
+        };
+        let current = snap.queue.current;
+        self.kill_decoder();
+        self.queue = snap.queue;
+        self.queue_name = snap.queue_name;
+        self.repeat = snap.repeat;
+        self.random = snap.random;
+        self.fatal_streak = 0;
+        self.dirty = true;
+        self.emit(Event::QueueChanged);
+        self.emit(Event::ModeChanged {
+            repeat: self.repeat,
+            random: self.random,
+        });
+        match current {
+            Some(i) if i < self.queue.items.len() => {
+                // 播放态继续播；暂停态解码预填但不播放，进度停在原处
+                self.start_track(i, snap.position_ms, snap.state == PlayState::Playing);
+            }
+            _ => {
+                self.state = PlayState::Stopped;
+                self.seek_base_ms = 0;
+                self.emit(Event::StateChanged {
+                    state: PlayState::Stopped,
+                });
+                self.emit(Event::SongChanged { index: None });
+            }
         }
     }
 
@@ -629,6 +745,7 @@ impl Engine {
             repeat: self.repeat,
             random: self.random,
             queue_name: self.queue_name.clone(),
+            peeking: self.peek.is_some(),
         }
     }
 }

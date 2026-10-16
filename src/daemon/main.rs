@@ -158,7 +158,10 @@ async fn dispatch(
     let id = msg.id;
 
     let replace = matches!(msg.request, Request::Open { .. });
-    if let Request::Add { paths } | Request::Open { paths } = msg.request {
+    let peeking = matches!(msg.request, Request::Peek { .. });
+    if let Request::Add { paths } | Request::Open { paths } | Request::Peek { paths } =
+        msg.request
+    {
         // 扫描可能耗时（大目录 + 逐文件读 tag），放阻塞线程池
         let cmd_tx = cmd_tx.clone();
         let out_tx = out_tx.clone();
@@ -167,7 +170,13 @@ async fn dispatch(
                 .await
                 .unwrap_or_default();
             let (reply_tx, reply_rx) = oneshot::channel();
-            let sent = if replace {
+            let sent = if peeking {
+                cmd_tx.send(ToEngine::PeekScanned {
+                    id,
+                    items,
+                    reply: reply_tx,
+                })
+            } else if replace {
                 cmd_tx.send(ToEngine::OpenScanned {
                     id,
                     items,

@@ -62,6 +62,10 @@ enum Command {
     /// 命名队列（播放列表）管理
     #[command(subcommand)]
     Pl(Pl),
+    /// 试听：保存当前状态，临时换成这些文件播放；播完自动恢复原队列与进度
+    Peek { paths: Vec<PathBuf> },
+    /// 结束试听，恢复进入试听前的队列与进度
+    Back,
     /// 让 rmusd 退出
     Quit,
 }
@@ -93,6 +97,9 @@ fn main() -> Result<()> {
     if let Some(Command::Pl(Pl::Add { paths, .. })) = cli.command.as_mut() {
         *paths = absolutize(paths);
     }
+    if let Some(Command::Peek { paths }) = cli.command.as_mut() {
+        *paths = absolutize(paths);
+    }
 
     let Some(command) = cli.command.as_ref() else {
         // 无子命令：带路径 = 直接播放（替换队列）；无路径 = TUI 占位摘要
@@ -115,6 +122,14 @@ fn main() -> Result<()> {
             let value = client.request(Request::Add { paths: paths.clone() })?;
             let added = value.get("added").and_then(|v| v.as_u64()).unwrap_or(0);
             println!("已添加 {added} 首");
+        }
+        Command::Peek { paths } => {
+            print_status(&status_reply(client.request(Request::Peek {
+                paths: paths.clone(),
+            })?)?);
+        }
+        Command::Back => {
+            print_status(&status_reply(client.request(Request::Back)?)?);
         }
         Command::Play { index } => {
             print_status(&status_reply(client.request(Request::Play { index: *index })?)?);
@@ -306,11 +321,12 @@ fn print_status(status: &StatusInfo) {
     };
     let random = if status.random { "随机" } else { "顺序" };
     let queue = status.queue_name.clone().unwrap_or_else(|| "临时".into());
+    let peek = if status.peeking { "  ♪试听中(rmus back 恢复)" } else { "" };
     match &status.track {
         Some(track) => {
             println!("{state}  {} - {}", track.title, track.artist);
             println!(
-                "  {} / {}   音量 {volume}%   {repeat}/{random}   队列[{queue}] {}/{}",
+                "  {} / {}   音量 {volume}%   {repeat}/{random}   队列[{queue}] {}/{}{peek}",
                 fmt_mmss(status.position_ms),
                 fmt_mmss(status.duration_ms),
                 status.current.map(|i| i + 1).unwrap_or(0),

@@ -56,6 +56,8 @@ pub struct StatusInfo {
     pub random: bool,
     /// 当前队列的名字；None = 匿名临时队列
     pub queue_name: Option<String>,
+    /// 试听态：队列是临时的，结束（播完/back）后恢复原队列与进度
+    pub peeking: bool,
 }
 
 /// 客户端请求。
@@ -68,6 +70,11 @@ pub enum Request {
     Add { paths: Vec<PathBuf> },
     /// 替换整个队列为这些文件/目录并从头播放（"只播放这些"）
     Open { paths: Vec<PathBuf> },
+    /// 试听：保存当前播放状态（队列/曲目/进度/模式），临时换成这些文件
+    /// 播放；临时队列播完自动恢复，或用 Back 提前恢复。由 daemon 层完成扫描。
+    Peek { paths: Vec<PathBuf> },
+    /// 结束试听，恢复进入试听前的状态
+    Back,
     /// 播放：Some(i) 从第 i 曲开始；None = 恢复暂停，或在停止状态下从头/继续
     Play { index: Option<usize> },
     Pause,
