@@ -54,6 +54,12 @@ pub enum ToEngine {
         items: Vec<QueueItem>,
         reply: oneshot::Sender<Result<Reply, String>>,
     },
+    /// 库模糊播放：把这首插到当前曲后立即播（空队列则直接播）
+    PlayNow {
+        id: u64,
+        item: QueueItem,
+        reply: oneshot::Sender<Result<Reply, String>>,
+    },
     /// daemon 层完成扫描后追加到命名队列
     PlaylistAddScanned {
         id: u64,
@@ -206,6 +212,10 @@ impl Engine {
                         continue;
                     }
                     self.enter_peek(items);
+                    let _ = reply.send(Ok(Reply::Status(Box::new(self.status()))));
+                }
+                Ok(ToEngine::PlayNow { item, reply, .. }) => {
+                    self.play_now(item);
                     let _ = reply.send(Ok(Reply::Status(Box::new(self.status()))));
                 }
                 Ok(ToEngine::PlaylistAddScanned {
@@ -463,6 +473,10 @@ impl Engine {
             }
             // Quit 由 daemon 层处理，不应到达这里
             Request::Quit => Err("内部错误：Quit 未在 daemon 层处理".into()),
+            // Find/PlayMatch/LibRescan 由 daemon 层处理（查库/扫描），不应到达这里
+            Request::Find { .. } | Request::PlayMatch { .. } | Request::LibRescan => {
+                Err("内部错误：库请求未在 daemon 层处理".into())
+            }
         }
     }
 
@@ -531,6 +545,20 @@ impl Engine {
         } else {
             self.stop();
         }
+    }
+
+    /// 插播：插到当前曲后立即播放；空队列/未开始时作为第一曲。
+    /// 播完由 on_eof 正常继续队列，不打断原有队列结构。
+    fn play_now(&mut self, item: QueueItem) {
+        let at = match self.queue.current {
+            Some(cur) => cur + 1,
+            None => 0,
+        };
+        let at = at.min(self.queue.items.len());
+        self.queue.items.insert(at, item);
+        self.dirty = true;
+        self.emit(Event::QueueChanged);
+        self.start_track(at, 0, true);
     }
 
     /// 进入试听：首次调用时存档当前状态，然后换成临时队列从头播放。

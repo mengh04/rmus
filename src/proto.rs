@@ -111,6 +111,13 @@ pub enum Request {
     SetRepeat { mode: Option<RepeatMode> },
     /// 随机播放开关
     SetRandom { on: Option<bool> },
+    /// 库模糊搜索：按相关度返回候选（daemon 层查索引）
+    Find { query: String },
+    /// 库模糊播放：最佳匹配插到当前曲后立即播（空队列则直接播）。
+    /// daemon 层匹配后转为引擎的 PlayNow。
+    PlayMatch { query: String },
+    /// 全量重建库索引（~/Music；daemon 层扫描）
+    LibRescan,
     /// 请求 daemon 退出（daemon 层处理，不进引擎）
     Quit,
 }
@@ -126,6 +133,8 @@ pub enum Reply {
         names: Vec<String>,
         current: Option<String>,
     },
+    /// 库搜索候选（按相关度降序）
+    Matches { tracks: Vec<TrackInfo> },
     Ok,
 }
 

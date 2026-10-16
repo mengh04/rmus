@@ -30,7 +30,8 @@ enum Command {
     /// 添加文件/目录到队列尾部（目录递归扫描）
     Add { paths: Vec<PathBuf> },
     /// 播放（可选队列下标，从 0 开始）
-    Play { index: Option<usize> },
+    /// 播放：无参数 = 恢复播放；纯数字 = 队列下标（从 0）；其他词 = 库模糊搜索（多词 AND，如 `rmus play secret 茅野`）
+    Play { index: Vec<String> },
     /// 暂停
     Pause,
     /// 播放/暂停切换
@@ -62,6 +63,11 @@ enum Command {
     /// 命名队列（播放列表）管理
     #[command(subcommand)]
     Pl(Pl),
+    /// 库操作
+    #[command(subcommand)]
+    Lib(Lib),
+    /// 库模糊搜索，列出候选（`rmus find secret`）
+    Find { query: String },
     /// 试听：保存当前状态，临时换成这些文件播放；播完自动恢复原队列与进度
     Peek { paths: Vec<PathBuf> },
     /// 结束试听，恢复进入试听前的队列与进度
@@ -84,6 +90,12 @@ enum Pl {
     Add { name: String, paths: Vec<PathBuf> },
     /// 删除命名队列（正在播放的除外）
     Remove { name: String },
+}
+
+#[derive(Subcommand)]
+enum Lib {
+    /// 全量重建库索引（扫描 ~/Music）
+    Rescan,
 }
 
 fn main() -> Result<()> {
@@ -123,6 +135,11 @@ fn main() -> Result<()> {
             let added = value.get("added").and_then(|v| v.as_u64()).unwrap_or(0);
             println!("已添加 {added} 首");
         }
+        Command::Lib(Lib::Rescan) => {
+            let value = client.request(Request::LibRescan)?;
+            let added = value.get("added").and_then(|v| v.as_u64()).unwrap_or(0);
+            println!("库索引已重建：{added} 首");
+        }
         Command::Peek { paths } => {
             print_status(&status_reply(client.request(Request::Peek {
                 paths: paths.clone(),
@@ -132,7 +149,40 @@ fn main() -> Result<()> {
             print_status(&status_reply(client.request(Request::Back)?)?);
         }
         Command::Play { index } => {
-            print_status(&status_reply(client.request(Request::Play { index: *index })?)?);
+            let request = match index.as_slice() {
+                [] => Request::Play { index: None },
+                [one] => match one.parse::<usize>() {
+                    Ok(i) => Request::Play { index: Some(i) },
+                    Err(_) => Request::PlayMatch { query: one.clone() },
+                },
+                // 多词：拼回空格分隔的查询串（引擎侧再分词 AND 匹配）
+                words => Request::PlayMatch {
+                    query: words.join(" "),
+                },
+            };
+            print_status(&status_reply(client.request(request)?)?);
+        }
+        Command::Find { query } => {
+            let value = client.request(Request::Find {
+                query: query.clone(),
+            })?;
+            let tracks: Vec<TrackInfo> = serde_json::from_value(
+                value.get("tracks").cloned().unwrap_or_default(),
+            )
+            .context("解析搜索结果失败")?;
+            if tracks.is_empty() {
+                println!("没有匹配 “{query}” 的曲子");
+                return Ok(());
+            }
+            for t in &tracks {
+                println!(
+                    "{:>2}. {} - {}  [{}]",
+                    t.index + 1,
+                    t.title,
+                    t.artist,
+                    t.album
+                );
+            }
         }
         Command::Pause => {
             print_status(&status_reply(client.request(Request::Pause)?)?);

@@ -7,17 +7,22 @@
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use rmus::engine::{Engine, ToEngine};
-use rmus::proto::{Request, RequestMsg, ServerMsg};
-use rmus::{scan, socket_path};
+use rmus::engine::queue::QueueItem;
+use rmus::proto::{Reply, Request, RequestMsg, ServerMsg, TrackInfo};
+use rmus::{library, scan, socket_path};
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::PathBuf;
 use std::sync::mpsc as std_mpsc;
+use std::sync::{Arc, RwLock};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 #[cfg(target_os = "linux")]
 mod mpris;
+
+/// 库索引共享状态（读多写少；临界区只是内存 Vec，std 锁足够）
+type Library = Arc<RwLock<Vec<QueueItem>>>;
 
 #[derive(Parser)]
 #[command(name = "rmusd", version, about = "rmus 播放守护进程")]
@@ -59,6 +64,18 @@ fn main() -> Result<()> {
             Err(e) => eprintln!("[rmusd] MPRIS 服务不可用（无桌面会话？）: {e:#}"),
         }
 
+        // 库索引：载入缓存；缓存为空（首次使用）则后台全量扫描 ~/Music
+        let library: Library = Arc::new(RwLock::new(library::load()));
+        if library.read().unwrap().is_empty() {
+            let lib = library.clone();
+            tokio::spawn(async move {
+                let items =
+                    tokio::task::spawn_blocking(library::rescan).await.unwrap_or_default();
+                println!("[rmusd] 库索引已建立：{} 首", items.len());
+                *lib.write().unwrap() = items;
+            });
+        }
+
         // 信号处理：退出时清理 socket 文件
         let sock_for_cleanup = sock.clone();
         tokio::spawn(async move {
@@ -75,7 +92,12 @@ fn main() -> Result<()> {
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
-                    tokio::spawn(handle_conn(stream, cmd_tx.clone(), events_tx.subscribe()));
+                    tokio::spawn(handle_conn(
+                        stream,
+                        cmd_tx.clone(),
+                        events_tx.subscribe(),
+                        library.clone(),
+                    ));
                 }
                 Err(e) => eprintln!("[rmusd] 接受连接失败: {e}"),
             }
@@ -87,6 +109,7 @@ async fn handle_conn(
     stream: UnixStream,
     cmd_tx: std_mpsc::Sender<ToEngine>,
     mut events: broadcast::Receiver<rmus::proto::Event>,
+    library: Library,
 ) {
     let (read_half, write_half) = stream.into_split();
 
@@ -142,7 +165,7 @@ async fn handle_conn(
                 continue;
             }
         };
-        dispatch(msg, &cmd_tx, &out_tx).await;
+        dispatch(msg, &cmd_tx, &out_tx, &library).await;
     }
 
     drop(out_tx);
@@ -154,8 +177,88 @@ async fn dispatch(
     msg: RequestMsg,
     cmd_tx: &std_mpsc::Sender<ToEngine>,
     out_tx: &mpsc::UnboundedSender<String>,
+    library: &Library,
 ) {
     let id = msg.id;
+
+    // 库模糊搜索：查索引直接回（不进引擎）
+    if let Request::Find { query } = msg.request {
+        let tracks = {
+            let lib = library.read().unwrap();
+            library::matches(&lib, &query)
+                .into_iter()
+                .take(10)
+                .enumerate()
+                .map(|(i, item)| TrackInfo {
+                    index: i,
+                    path: item.path.clone(),
+                    title: item.title.clone(),
+                    artist: item.artist.clone(),
+                    album: item.album.clone(),
+                    duration_ms: item.duration_ms,
+                })
+                .collect()
+        };
+        let json = serde_json::to_string(&ServerMsg::Reply {
+            id,
+            result: Reply::Matches { tracks },
+        })
+        .unwrap_or_default();
+        let _ = out_tx.send(json);
+        return;
+    }
+
+    // 库模糊播放：最佳匹配转引擎插播
+    if let Request::PlayMatch { query } = msg.request {
+        let best = {
+            let lib = library.read().unwrap();
+            library::matches(&lib, &query).into_iter().next().cloned()
+        };
+        match best {
+            Some(item) => {
+                let (reply_tx, reply_rx) = oneshot::channel();
+                if cmd_tx
+                    .send(ToEngine::PlayNow {
+                        id,
+                        item,
+                        reply: reply_tx,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+                send_reply(id, reply_rx.await, out_tx);
+            }
+            None => {
+                let json = serde_json::to_string(&error_reply(
+                    id,
+                    format!("库中没有匹配 “{query}” 的曲子"),
+                ))
+                .unwrap_or_default();
+                let _ = out_tx.send(json);
+            }
+        }
+        return;
+    }
+
+    // 全量重建库索引（阻塞线程池扫描），完成后更新共享索引
+    if matches!(msg.request, Request::LibRescan) {
+        let lib = library.clone();
+        let out_tx = out_tx.clone();
+        tokio::spawn(async move {
+            let items =
+                tokio::task::spawn_blocking(library::rescan).await.unwrap_or_default();
+            let added = items.len();
+            *lib.write().unwrap() = items;
+            let json = serde_json::to_string(&ServerMsg::Reply {
+                id,
+                result: Reply::Added { added },
+            })
+            .unwrap_or_default();
+            let _ = out_tx.send(json);
+        });
+        return;
+    }
 
     let replace = matches!(msg.request, Request::Open { .. });
     let peeking = matches!(msg.request, Request::Peek { .. });
