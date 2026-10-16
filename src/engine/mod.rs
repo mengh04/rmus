@@ -363,16 +363,38 @@ impl Engine {
                 Ok(Reply::Ok)
             }
             Request::Remove { index } => {
+                let index = match index {
+                    Some(i) => i,
+                    None => match self.queue.current {
+                        Some(c) => c,
+                        None => return Err("当前没有正在播放的曲子".into()),
+                    },
+                };
+                if index >= self.queue.len() {
+                    return Err(format!("下标 {index} 超出队列范围"));
+                }
                 let removed_current = self.queue.remove(index);
                 if let Some(name) = self.queue_name.clone()
-                    && let Some(items) = self.named.get_mut(&name) {
-                        items.remove(index);
-                    }
-                if removed_current {
-                    self.stop();
+                    && let Some(items) = self.named.get_mut(&name)
+                    && index < items.len()
+                {
+                    items.remove(index);
                 }
                 self.dirty = true;
                 self.emit(Event::QueueChanged);
+                if removed_current {
+                    if self.queue.items.is_empty() {
+                        // 删空了：试听态恢复原队列，否则停止
+                        self.finish_or_restore();
+                    } else if self.state == PlayState::Stopped {
+                        // 停止态整理队列：不自动开播，current 指向删除点
+                        self.queue.current = Some(index.min(self.queue.items.len() - 1));
+                    } else {
+                        // 续播删除点的下一首（删的是队尾则退到新的最后一首）
+                        let at = index.min(self.queue.items.len() - 1);
+                        self.start_track(at, 0, true);
+                    }
+                }
                 Ok(Reply::Ok)
             }
             Request::Shuffle => {

@@ -52,8 +52,8 @@ enum Command {
     Queue,
     /// 清空队列并停止
     Clear,
-    /// 删除队列中的第 index 曲
-    Remove { index: usize },
+    /// 删除队列中的曲子：无参数 = 删掉正在播放的这首（自动续播下一首）；数字 = 删第 index 首
+    Remove { index: Option<usize> },
     /// 打乱队列（当前曲移到队首）
     Shuffle,
     /// 循环模式：无参数循环切换 off -> all -> one -> off；或直接指定
@@ -243,7 +243,10 @@ fn main() -> Result<()> {
         }
         Command::Remove { index } => {
             client.request(Request::Remove { index: *index })?;
-            println!("已删除第 {index} 首");
+            match index {
+                Some(i) => println!("已删除第 {i} 首"),
+                None => println!("已删除当前曲"),
+            }
         }
         Command::Shuffle => {
             client.request(Request::Shuffle)?;

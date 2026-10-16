@@ -91,7 +91,8 @@ pub enum Request {
     SetVolume { value: f32 },
     AdjustVolume { delta: f32 },
     Clear,
-    Remove { index: usize },
+    /// 删除队列中的第 index 曲；None = 删除正在播放的曲子（自动续播下一首）
+    Remove { index: Option<usize> },
     /// 打乱队列（当前曲移到队首）
     Shuffle,
     QueueList,
