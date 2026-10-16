@@ -84,22 +84,47 @@ impl ArtCache {
     }
 }
 
-/// 从音频文件 tag 提取内嵌封面（优先 CoverFront，否则第一张）
-fn extract_art(path: &std::path::Path) -> Option<(Vec<u8>, String)> {
+/// 从音频文件 tag 提取内嵌封面与歌词（一次 parse，切歌只读一遍文件）。
+/// 封面优先 CoverFront，否则第一张；歌词尝试 UnsyncLyrics（ID3v2 USLT、
+/// Vorbis UNSYNCEDLYRICS）和 Lyrics（Vorbis LYRICS）两个 key。
+fn extract_extras(
+    path: &std::path::Path,
+) -> (
+    Option<(Vec<u8>, String)>,
+    Option<String>,
+) {
     use lofty::file::TaggedFileExt;
-    let tagged = lofty::probe::Probe::open(path).ok()?.read().ok()?;
-    let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
-    let pictures = tag.pictures();
-    let pic = pictures
-        .iter()
-        .find(|p| p.pic_type() == lofty::picture::PictureType::CoverFront)
-        .or_else(|| pictures.first())?;
-    let ext = pic
-        .mime_type()
-        .and_then(|m| m.ext())
-        .unwrap_or("jpg")
-        .to_string();
-    Some((pic.data().to_vec(), ext))
+    use lofty::tag::ItemKey;
+    let Ok(tagged) = lofty::probe::Probe::open(path).and_then(|p| p.read()) else {
+        return (None, None);
+    };
+    let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) else {
+        return (None, None);
+    };
+
+    let art = {
+        let pictures = tag.pictures();
+        pictures
+            .iter()
+            .find(|p| p.pic_type() == lofty::picture::PictureType::CoverFront)
+            .or_else(|| pictures.first())
+            .map(|pic| {
+                let ext = pic
+                    .mime_type()
+                    .and_then(|m| m.ext())
+                    .unwrap_or("jpg")
+                    .to_string();
+                (pic.data().to_vec(), ext)
+            })
+    };
+
+    let lyrics = tag
+        .get_string(ItemKey::UnsyncLyrics)
+        .or_else(|| tag.get_string(ItemKey::Lyrics))
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty());
+
+    (art, lyrics)
 }
 
 struct Shared {
@@ -108,6 +133,8 @@ struct Shared {
     last_position: Option<u64>,
     /// 当前曲封面的 file:// URL
     art_url: Option<String>,
+    /// 当前曲歌词（内嵌 tag 原文，可能是 LRC）
+    lyrics: Option<String>,
     /// 封面临时文件管理
     art: ArtCache,
 }
@@ -127,6 +154,7 @@ pub async fn spawn(
         status: fetch_status(&cmd_tx).await.unwrap_or_default(),
         last_position: None,
         art_url: None,
+        lyrics: None,
         art: ArtCache::new(),
     }));
 
@@ -191,18 +219,23 @@ async fn handle_event(
                 let mut data = shared.write().await;
                 data.status = status.clone();
 
-                // 切歌时按需提取内嵌封面到临时文件（几~几十 ms，切歌不频繁）
-                let art_url = if matches!(event, Event::SongChanged { .. }) {
-                    let art = data
+                // 切歌时按需提取内嵌封面与歌词（几~几十 ms，切歌不频繁）
+                let (art_url, lyrics) = if matches!(event, Event::SongChanged { .. }) {
+                    let extras = data
                         .status
                         .track
                         .as_ref()
-                        .and_then(|t| extract_art(&t.path));
-                    let url = art.and_then(|(bytes, ext)| data.art.store(&bytes, &ext));
+                        .map(|t| extract_extras(&t.path))
+                        .unwrap_or_default();
+                    let url = extras
+                        .0
+                        .as_ref()
+                        .and_then(|(bytes, ext)| data.art.store(bytes, ext));
                     data.art_url = url.clone();
-                    url
+                    data.lyrics = extras.1.clone();
+                    (url, extras.1)
                 } else {
-                    data.art_url.clone()
+                    (data.art_url.clone(), data.lyrics.clone())
                 };
                 drop(data);
 
@@ -213,6 +246,7 @@ async fn handle_event(
                     Event::SongChanged { .. } => vec![Property::Metadata(build_metadata(
                         &status,
                         art_url.as_deref(),
+                        lyrics.as_deref(),
                     ))],
                     _ => vec![],
                 };
@@ -258,7 +292,11 @@ fn loop_status(repeat: RepeatMode) -> LoopStatus {
     }
 }
 
-fn build_metadata(status: &StatusInfo, art_url: Option<&str>) -> MprisMetadata {
+fn build_metadata(
+    status: &StatusInfo,
+    art_url: Option<&str>,
+    lyrics: Option<&str>,
+) -> MprisMetadata {
     let mut m = MprisMetadata::new();
     let track_path = format!("/dev/rmus/queue/{}", status.current.unwrap_or(0));
     if let Ok(path) = zbus::zvariant::ObjectPath::try_from(track_path) {
@@ -266,6 +304,9 @@ fn build_metadata(status: &StatusInfo, art_url: Option<&str>) -> MprisMetadata {
     }
     if let Some(art_url) = art_url {
         m.set_art_url(Some(art_url));
+    }
+    if let Some(lyrics) = lyrics {
+        m.set_lyrics(Some(lyrics));
     }
     if let Some(track) = &status.track {
         m.set_title(Some(track.title.clone()));
@@ -439,7 +480,11 @@ impl PlayerInterface for Mpris {
 
     async fn metadata(&self) -> fdo::Result<MprisMetadata> {
         let data = self.shared.read().await;
-        Ok(build_metadata(&data.status, data.art_url.as_deref()))
+        Ok(build_metadata(
+            &data.status,
+            data.art_url.as_deref(),
+            data.lyrics.as_deref(),
+        ))
     }
 
     async fn open_uri(&self, _uri: String) -> fdo::Result<()> {
