@@ -89,6 +89,8 @@ pub struct Engine {
     to_engine_tx: mpsc::Sender<ToEngine>,
     /// 状态是否需要落盘
     dirty: bool,
+    /// 连续解码失败计数；达到队列长度即认为整队列都播不了，停止
+    fatal_streak: usize,
     last_position_event: Instant,
 }
 
@@ -132,6 +134,7 @@ impl Engine {
             events,
             to_engine_tx,
             dirty: false,
+            fatal_streak: 0,
             last_position_event: Instant::now()
                 - POSITION_EVENT_INTERVAL, // 首个事件立即发
         })
@@ -198,6 +201,7 @@ impl Engine {
                 Ok(ToEngine::TrackEof { generation }) => {
                     if self.decoder.as_ref().is_some_and(|d| d.generation == generation) {
                         self.decoder = None;
+                        self.fatal_streak = 0; // 正常播完一首，重置连续失败计数
                         self.on_eof();
                     }
                 }
@@ -205,7 +209,15 @@ impl Engine {
                     if self.decoder.as_ref().is_some_and(|d| d.generation == generation) {
                         self.decoder = None;
                         eprintln!("[rmusd] 跳过无法播放的曲子: {error}");
-                        self.on_eof();
+                        self.fatal_streak += 1;
+                        let limit = self.queue.len().max(1);
+                        if self.fatal_streak >= limit {
+                            // 整个队列挨个试过都失败：停止，避免循环重试烧 CPU
+                            eprintln!("[rmusd] 队列连续 {limit} 首无法播放，停止播放");
+                            self.stop();
+                        } else {
+                            self.on_eof();
+                        }
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}

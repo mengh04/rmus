@@ -83,7 +83,16 @@ enum Pl {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    // 相对路径以客户端 CWD 解释，统一转绝对路径再发给 daemon
+    // （daemon 的 CWD 是它被拉起时的目录，直接转发相对路径会找错文件）
+    cli.paths = absolutize(&cli.paths);
+    if let Some(Command::Add { paths }) = cli.command.as_mut() {
+        *paths = absolutize(paths);
+    }
+    if let Some(Command::Pl(Pl::Add { paths, .. })) = cli.command.as_mut() {
+        *paths = absolutize(paths);
+    }
 
     let Some(command) = cli.command.as_ref() else {
         // 无子命令：带路径 = 直接播放（替换队列）；无路径 = TUI 占位摘要
@@ -265,6 +274,14 @@ fn connect(cli: &Cli) -> Result<Client> {
     } else {
         Client::connect_or_spawn(cli.socket.clone())
     }
+}
+
+/// 相对路径转绝对路径（以客户端 CWD 解释），不解析符号链接。
+fn absolutize(paths: &[PathBuf]) -> Vec<PathBuf> {
+    paths
+        .iter()
+        .map(|p| std::path::absolute(p).unwrap_or_else(|_| p.clone()))
+        .collect()
 }
 
 fn status_of(client: &mut Client) -> Result<StatusInfo> {

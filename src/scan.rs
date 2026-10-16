@@ -19,13 +19,14 @@ pub fn is_audio_file(path: &Path) -> bool {
 }
 
 /// 收集路径列表中的音频文件（目录递归，按路径排序），读取元数据。
-/// 单个文件读不动时用文件名兜底，不让一首坏歌挡住整个 add。
+/// 不存在的文件直接跳过（相对路径错误/已删除），单文件元数据读不动时
+/// 用文件名兜底，不让一首坏歌挡住整个 add。
 pub fn collect(paths: &[PathBuf]) -> Vec<QueueItem> {
     let mut files = Vec::new();
     for path in paths {
         if path.is_dir() {
             collect_dir(path, &mut files);
-        } else if is_audio_file(path) {
+        } else if is_audio_file(path) && path.is_file() {
             files.push(path.clone());
         }
     }
