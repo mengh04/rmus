@@ -21,10 +21,95 @@ use zbus::fdo;
 /// Position 事件间隔的公差：超过它视为用户 seek（发 Seeked 信号）
 const SEEK_DETECT_MS: i64 = 2000;
 
+/// 封面临时文件前缀：/tmp/rmus-art-{pid}-{counter}.{ext}
+const ART_PREFIX: &str = "rmus-art-";
+
+/// 当前曲封面的临时文件管理。
+///
+/// 每次切歌写一个新文件（counter 递增，文件名变化让 MPRIS 客户端
+/// 重新加载图片），并删除上一张。daemon 崩溃残留的孤儿文件在下次
+/// 启动时按 /proc 探活清理。
+struct ArtCache {
+    counter: u64,
+    last_file: Option<std::path::PathBuf>,
+}
+
+impl ArtCache {
+    fn new() -> Self {
+        Self {
+            counter: 0,
+            last_file: None,
+        }
+    }
+
+    fn store(&mut self, data: &[u8], ext: &str) -> Option<String> {
+        let path = std::env::temp_dir().join(format!(
+            "{ART_PREFIX}{}-{}.{ext}",
+            std::process::id(),
+            self.counter
+        ));
+        self.counter += 1;
+        std::fs::write(&path, data).ok()?;
+        if let Some(old) = self.last_file.take() {
+            let _ = std::fs::remove_file(old);
+        }
+        self.last_file = Some(path.clone());
+        url::Url::from_file_path(path).ok().map(|u| u.to_string())
+    }
+
+    /// 删除残留的孤儿封面（pid 已不存在的）
+    fn cleanup_orphans() {
+        let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let Some(suffix) = name.strip_prefix(ART_PREFIX) else {
+                continue;
+            };
+            let Some((pid, _)) = suffix.split_once('-') else {
+                continue;
+            };
+            let Ok(pid) = pid.parse::<u32>() else {
+                continue;
+            };
+            // 自己 pid 的文件可能是刚启动就切歌写下的，不清理
+            if pid == std::process::id() || std::path::Path::new(&format!("/proc/{pid}")).exists()
+            {
+                continue;
+            }
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// 从音频文件 tag 提取内嵌封面（优先 CoverFront，否则第一张）
+fn extract_art(path: &std::path::Path) -> Option<(Vec<u8>, String)> {
+    use lofty::file::TaggedFileExt;
+    let tagged = lofty::probe::Probe::open(path).ok()?.read().ok()?;
+    let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
+    let pictures = tag.pictures();
+    let pic = pictures
+        .iter()
+        .find(|p| p.pic_type() == lofty::picture::PictureType::CoverFront)
+        .or_else(|| pictures.first())?;
+    let ext = pic
+        .mime_type()
+        .and_then(|m| m.ext())
+        .unwrap_or("jpg")
+        .to_string();
+    Some((pic.data().to_vec(), ext))
+}
+
 struct Shared {
     status: StatusInfo,
     /// 上一次 Position 事件的值，用于检测 seek 跳变
     last_position: Option<u64>,
+    /// 当前曲封面的 file:// URL
+    art_url: Option<String>,
+    /// 封面临时文件管理
+    art: ArtCache,
 }
 
 pub struct Mpris {
@@ -37,9 +122,12 @@ pub async fn spawn(
     cmd_tx: std_mpsc::Sender<ToEngine>,
     mut events: broadcast::Receiver<Event>,
 ) -> anyhow::Result<()> {
+    ArtCache::cleanup_orphans();
     let shared = Arc::new(RwLock::new(Shared {
         status: fetch_status(&cmd_tx).await.unwrap_or_default(),
         last_position: None,
+        art_url: None,
+        art: ArtCache::new(),
     }));
 
     let server = Server::new("rmus", Mpris {
@@ -101,14 +189,31 @@ async fn handle_event(
         Event::StateChanged { .. } | Event::SongChanged { .. } | Event::QueueChanged => {
             if let Some(status) = fetch_status(cmd_tx).await {
                 let mut data = shared.write().await;
-                data.status = status;
-                let status = data.status.clone();
+                data.status = status.clone();
+
+                // 切歌时按需提取内嵌封面到临时文件（几~几十 ms，切歌不频繁）
+                let art_url = if matches!(event, Event::SongChanged { .. }) {
+                    let art = data
+                        .status
+                        .track
+                        .as_ref()
+                        .and_then(|t| extract_art(&t.path));
+                    let url = art.and_then(|(bytes, ext)| data.art.store(&bytes, &ext));
+                    data.art_url = url.clone();
+                    url
+                } else {
+                    data.art_url.clone()
+                };
                 drop(data);
+
                 let props = match event {
-                    Event::StateChanged { .. } => vec![Property::PlaybackStatus(
-                        playback_status(&status),
-                    )],
-                    Event::SongChanged { .. } => vec![Property::Metadata(build_metadata(&status))],
+                    Event::StateChanged { .. } => {
+                        vec![Property::PlaybackStatus(playback_status(&status))]
+                    }
+                    Event::SongChanged { .. } => vec![Property::Metadata(build_metadata(
+                        &status,
+                        art_url.as_deref(),
+                    ))],
                     _ => vec![],
                 };
                 if !props.is_empty() {
@@ -153,11 +258,14 @@ fn loop_status(repeat: RepeatMode) -> LoopStatus {
     }
 }
 
-fn build_metadata(status: &StatusInfo) -> MprisMetadata {
+fn build_metadata(status: &StatusInfo, art_url: Option<&str>) -> MprisMetadata {
     let mut m = MprisMetadata::new();
     let track_path = format!("/dev/rmus/queue/{}", status.current.unwrap_or(0));
     if let Ok(path) = zbus::zvariant::ObjectPath::try_from(track_path) {
         m.set_trackid(Some(TrackId::from(path)));
+    }
+    if let Some(art_url) = art_url {
+        m.set_art_url(Some(art_url));
     }
     if let Some(track) = &status.track {
         m.set_title(Some(track.title.clone()));
@@ -330,7 +438,8 @@ impl PlayerInterface for Mpris {
     }
 
     async fn metadata(&self) -> fdo::Result<MprisMetadata> {
-        Ok(build_metadata(&self.status().await))
+        let data = self.shared.read().await;
+        Ok(build_metadata(&data.status, data.art_url.as_deref()))
     }
 
     async fn open_uri(&self, _uri: String) -> fdo::Result<()> {
