@@ -18,3 +18,15 @@ pub fn socket_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join("rmus.sock")
 }
+
+/// 状态（命名队列等）目录。
+pub fn state_dir() -> PathBuf {
+    std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("HOME")
+                .map(|h| PathBuf::from(h).join(".local").join("state"))
+                .unwrap_or_else(|| PathBuf::from(".local").join("state"))
+        })
+        .join("rmus")
+}

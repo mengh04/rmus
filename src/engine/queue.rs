@@ -1,9 +1,10 @@
 //! 播放队列。引擎内部状态，不含 UI 概念。
 
 use crate::proto::TrackInfo;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueueItem {
     pub path: PathBuf,
     pub title: String,
@@ -43,23 +44,23 @@ impl Queue {
         })
     }
 
-    /// 前进。返回新的当前下标；到队尾返回 None（并清除 current）。
-    pub fn advance(&mut self) -> Option<usize> {
+    /// 前进一格下标（不做越界回绕——循环/随机语义由引擎决定）。
+    /// 返回 None 表示越过队尾。
+    pub fn next_index(&self) -> Option<usize> {
         let next = self.current.map_or(0, |c| c + 1);
         if next < self.items.len() {
-            self.current = Some(next);
             Some(next)
         } else {
-            self.current = None;
             None
         }
     }
 
-    /// 后退。队首再退就停在第 0 曲（MPD 行为）。
-    pub fn rewind(&mut self) -> Option<usize> {
-        let prev = self.current.map_or(0, |c| c.saturating_sub(1));
-        self.current = Some(prev);
-        Some(prev)
+    /// 后退一格下标；队首再退停在 0。返回 None 表示队列为空。
+    pub fn prev_index(&self) -> Option<usize> {
+        if self.items.is_empty() {
+            return None;
+        }
+        Some(self.current.map_or(0, |c| c.saturating_sub(1)))
     }
 
     /// 打乱队列，当前曲（若有）移到队首并成为第 0 曲。
@@ -104,7 +105,7 @@ impl Queue {
 }
 
 /// 轻量 xorshift PRNG，避免仅为 shuffle 引入 rand 依赖。
-fn simple_rng() -> u64 {
+pub fn simple_rng() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     let seed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -113,7 +114,7 @@ fn simple_rng() -> u64 {
     seed | 1
 }
 
-fn next_rand(state: &mut u64) -> u64 {
+pub fn next_rand(state: &mut u64) -> u64 {
     *state ^= *state << 13;
     *state ^= *state >> 7;
     *state ^= *state << 17;

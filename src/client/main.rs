@@ -21,6 +21,8 @@ struct Cli {
     no_spawn: bool,
     #[command(subcommand)]
     command: Option<Command>,
+    /// 直接播放：rmus 文件或目录...（替换当前队列并从头播）
+    paths: Vec<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -53,16 +55,46 @@ enum Command {
     Remove { index: usize },
     /// 打乱队列（当前曲移到队首）
     Shuffle,
+    /// 循环模式：无参数循环切换 off -> all -> one -> off；或直接指定
+    Repeat { mode: Option<String> },
+    /// 随机播放：无参数切换；或 on/off
+    Random { mode: Option<String> },
+    /// 命名队列（播放列表）管理
+    #[command(subcommand)]
+    Pl(Pl),
     /// 让 rmusd 退出
     Quit,
+}
+
+#[derive(Subcommand)]
+enum Pl {
+    /// 列出所有命名队列
+    List,
+    /// 创建空队列
+    New { name: String },
+    /// 把当前队列保存为命名队列（覆盖同名；当前队列即变为该命名队列）
+    Save { name: String },
+    /// 切换到命名队列并从头播放
+    Play { name: String },
+    /// 添加文件/目录到命名队列（不存在则创建；正播放该队列时立即生效）
+    Add { name: String, paths: Vec<PathBuf> },
+    /// 删除命名队列（正在播放的除外）
+    Remove { name: String },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
     let Some(command) = cli.command.as_ref() else {
-        // TUI 未实现前的占位：显示状态摘要
+        // 无子命令：带路径 = 直接播放（替换队列）；无路径 = TUI 占位摘要
         let mut client = connect(&cli)?;
+        if !cli.paths.is_empty() {
+            let value = client.request(Request::Open {
+                paths: cli.paths.clone(),
+            })?;
+            print_status(&status_reply(value)?);
+            return Ok(());
+        }
         print_status(&status_of(&mut client)?);
         println!("\n(TUI 尚未实现，rmus --help 查看子命令)");
         return Ok(());
@@ -143,9 +175,85 @@ fn main() -> Result<()> {
             client.request(Request::Shuffle)?;
             println!("队列已打乱");
         }
+        Command::Repeat { mode } => {
+            let value = client.request(Request::SetRepeat {
+                mode: mode.as_deref().map(parse_repeat).transpose()?,
+            })?;
+            print_status(&status_reply(value)?);
+        }
+        Command::Random { mode } => {
+            let on = match mode.as_deref() {
+                None => None,
+                Some("on") | Some("1") | Some("true") => Some(true),
+                Some("off") | Some("0") | Some("false") => Some(false),
+                Some(other) => bail!("random 参数应为 on/off，收到 {other}"),
+            };
+            let value = client.request(Request::SetRandom { on })?;
+            print_status(&status_reply(value)?);
+        }
+        Command::Pl(pl) => handle_pl(&mut client, pl)?,
         Command::Quit => {
             client.request(Request::Quit)?;
             println!("rmusd 已退出");
+        }
+    }
+    Ok(())
+}
+
+fn parse_repeat(mode: &str) -> Result<rmus::proto::RepeatMode> {
+    match mode {
+        "off" | "0" => Ok(rmus::proto::RepeatMode::Off),
+        "all" | "on" | "1" => Ok(rmus::proto::RepeatMode::All),
+        "one" | "single" => Ok(rmus::proto::RepeatMode::One),
+        other => bail!("repeat 参数应为 off/all/one，收到 {other}"),
+    }
+}
+
+fn handle_pl(client: &mut Client, pl: &Pl) -> Result<()> {
+    match pl {
+        Pl::List => {
+            let value = client.request(Request::PlaylistsList)?;
+            let names: Vec<String> = serde_json::from_value(
+                value.get("names").cloned().unwrap_or_default(),
+            )
+            .context("解析队列列表失败")?;
+            let current = value.get("current").and_then(|v| v.as_str());
+            if names.is_empty() {
+                println!("（没有命名队列，rmus pl save 名字 可保存当前队列）");
+                return Ok(());
+            }
+            for name in names {
+                let marker = if Some(name.as_str()) == current {
+                    "▶"
+                } else {
+                    " "
+                };
+                println!("{marker} {name}");
+            }
+        }
+        Pl::New { name } => {
+            client.request(Request::PlaylistNew { name: name.clone() })?;
+            println!("队列 {name} 已创建");
+        }
+        Pl::Save { name } => {
+            client.request(Request::PlaylistSave { name: name.clone() })?;
+            println!("当前队列已保存为 {name}");
+        }
+        Pl::Play { name } => {
+            let value = client.request(Request::PlaylistPlay { name: name.clone() })?;
+            print_status(&status_reply(value)?);
+        }
+        Pl::Add { name, paths } => {
+            let value = client.request(Request::PlaylistAdd {
+                name: name.clone(),
+                paths: paths.clone(),
+            })?;
+            let added = value.get("added").and_then(|v| v.as_u64()).unwrap_or(0);
+            println!("已向队列 {name} 添加 {added} 首");
+        }
+        Pl::Remove { name } => {
+            client.request(Request::PlaylistRemove { name: name.clone() })?;
+            println!("队列 {name} 已删除");
         }
     }
     Ok(())
@@ -174,11 +282,18 @@ fn print_status(status: &StatusInfo) {
         PlayState::Stopped => "■ 已停止",
     };
     let volume = (status.volume.clamp(0.0, 1.0) * 100.0).round() as u32;
+    let repeat = match status.repeat {
+        rmus::proto::RepeatMode::Off => "循环关",
+        rmus::proto::RepeatMode::All => "列表循环",
+        rmus::proto::RepeatMode::One => "单曲循环",
+    };
+    let random = if status.random { "随机" } else { "顺序" };
+    let queue = status.queue_name.clone().unwrap_or_else(|| "临时".into());
     match &status.track {
         Some(track) => {
             println!("{state}  {} - {}", track.title, track.artist);
             println!(
-                "  {} / {}   音量 {volume}%   队列 {}/{}",
+                "  {} / {}   音量 {volume}%   {repeat}/{random}   队列[{queue}] {}/{}",
                 fmt_mmss(status.position_ms),
                 fmt_mmss(status.duration_ms),
                 status.current.map(|i| i + 1).unwrap_or(0),
@@ -186,7 +301,10 @@ fn print_status(status: &StatusInfo) {
             );
         }
         None => {
-            println!("{state}   音量 {volume}%   队列 {} 首", status.queue_len);
+            println!(
+                "{state}   音量 {volume}%   {repeat}/{random}   队列[{queue}] {} 首",
+                status.queue_len
+            );
         }
     }
 }

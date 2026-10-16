@@ -12,9 +12,11 @@ mod decoder;
 mod output;
 pub mod queue;
 mod resample;
+mod store;
 
-use crate::proto::{Event, PlayState, Reply, Request, StatusInfo};
+use crate::proto::{Event, PlayState, RepeatMode, Reply, Request, StatusInfo};
 use anyhow::Result;
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
@@ -40,6 +42,19 @@ pub enum ToEngine {
         items: Vec<QueueItem>,
         reply: oneshot::Sender<Result<Reply, String>>,
     },
+    /// daemon 层完成扫描后替换队列并从头播放
+    OpenScanned {
+        id: u64,
+        items: Vec<QueueItem>,
+        reply: oneshot::Sender<Result<Reply, String>>,
+    },
+    /// daemon 层完成扫描后追加到命名队列
+    PlaylistAddScanned {
+        id: u64,
+        name: String,
+        items: Vec<QueueItem>,
+        reply: oneshot::Sender<Result<Reply, String>>,
+    },
     TrackEof {
         generation: u64,
     },
@@ -56,6 +71,12 @@ struct DecoderHandle {
 
 pub struct Engine {
     queue: Queue,
+    /// 当前队列的名字；None = 匿名临时队列（open/add 出来的）
+    queue_name: Option<String>,
+    /// 命名队列（播放列表）
+    named: BTreeMap<String, Vec<QueueItem>>,
+    repeat: RepeatMode,
+    random: bool,
     state: PlayState,
     output: Output,
     decoder: Option<DecoderHandle>,
@@ -66,6 +87,8 @@ pub struct Engine {
     events: broadcast::Sender<Event>,
     /// 解码线程回报 EOF/错误用（与外部命令同一个接收端）
     to_engine_tx: mpsc::Sender<ToEngine>,
+    /// 状态是否需要落盘
+    dirty: bool,
     last_position_event: Instant,
 }
 
@@ -83,9 +106,24 @@ impl Engine {
     }
 
     fn new(events: broadcast::Sender<Event>, to_engine_tx: mpsc::Sender<ToEngine>) -> Result<Self> {
-        let output = Output::open()?;
+        let mut output = Output::open()?;
+        let persisted = store::load();
+        let mut queue = Queue {
+            items: persisted.current_queue,
+            current: persisted.current_index,
+        };
+        if queue.current.is_some_and(|i| i >= queue.items.len()) {
+            queue.current = queue.items.len().checked_sub(1);
+        }
+        if let Some(volume) = persisted.volume {
+            output.set_volume(volume);
+        }
         Ok(Self {
-            queue: Queue::default(),
+            queue,
+            queue_name: persisted.queue_name,
+            named: persisted.named,
+            repeat: persisted.repeat.unwrap_or_default(),
+            random: persisted.random.unwrap_or(false),
             state: PlayState::Stopped,
             output,
             decoder: None,
@@ -93,6 +131,7 @@ impl Engine {
             seek_base_ms: 0,
             events,
             to_engine_tx,
+            dirty: false,
             last_position_event: Instant::now()
                 - POSITION_EVENT_INTERVAL, // 首个事件立即发
         })
@@ -117,26 +156,78 @@ impl Engine {
                 Ok(ToEngine::AddScanned { items, reply, .. }) => {
                     let added = items.len();
                     self.queue.items.extend(items);
+                    self.dirty = true;
                     self.emit(Event::QueueChanged);
+                    let _ = reply.send(Ok(Reply::Added { added }));
+                }
+                Ok(ToEngine::OpenScanned { items, reply, .. }) => {
+                    if items.is_empty() {
+                        let _ = reply.send(Err("没有找到可播放的音频文件".into()));
+                        continue;
+                    }
+                    self.kill_decoder();
+                    self.queue.items = items;
+                    self.queue.current = None;
+                    self.queue_name = None;
+                    self.dirty = true;
+                    self.emit(Event::QueueChanged);
+                    self.start_track(0, 0, true);
+                    let _ = reply.send(Ok(Reply::Status(Box::new(self.status()))));
+                }
+                Ok(ToEngine::PlaylistAddScanned {
+                    name,
+                    items,
+                    reply,
+                    ..
+                }) => {
+                    let added = items.len();
+                    self.named.entry(name.clone()).or_default().extend(items);
+                    if self.queue_name.as_deref() == Some(name.as_str()) {
+                        // 命名队列就是当前队列：同步追加，播放体验连续
+                        let extra: Vec<QueueItem> = self
+                            .named
+                            .get(&name)
+                            .map(|items| items[items.len() - added..].to_vec())
+                            .unwrap_or_default();
+                        self.queue.items.extend(extra);
+                        self.emit(Event::QueueChanged);
+                    }
+                    self.dirty = true;
                     let _ = reply.send(Ok(Reply::Added { added }));
                 }
                 Ok(ToEngine::TrackEof { generation }) => {
                     if self.decoder.as_ref().is_some_and(|d| d.generation == generation) {
                         self.decoder = None;
-                        self.advance();
+                        self.on_eof();
                     }
                 }
                 Ok(ToEngine::TrackFatal { generation, error }) => {
                     if self.decoder.as_ref().is_some_and(|d| d.generation == generation) {
                         self.decoder = None;
                         eprintln!("[rmusd] 跳过无法播放的曲子: {error}");
-                        self.advance();
+                        self.on_eof();
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
+            if self.dirty {
+                self.dirty = false;
+                self.persist();
+            }
         }
+    }
+
+    fn persist(&self) {
+        store::save(&store::PersistedState {
+            volume: Some(self.output.volume()),
+            repeat: Some(self.repeat),
+            random: Some(self.random),
+            queue_name: self.queue_name.clone(),
+            current_index: self.queue.current,
+            current_queue: self.queue.items.clone(),
+            named: self.named.clone(),
+        });
     }
 
     fn emit(&self, event: Event) {
@@ -173,11 +264,11 @@ impl Engine {
                 Ok(Reply::Status(Box::new(self.status())))
             }
             Request::Next => {
-                self.advance();
+                self.on_next();
                 Ok(Reply::Status(Box::new(self.status())))
             }
             Request::Prev => {
-                self.rewind();
+                self.on_prev();
                 Ok(Reply::Status(Box::new(self.status())))
             }
             Request::Seek { position_ms } => {
@@ -192,18 +283,25 @@ impl Engine {
             }
             Request::SetVolume { value } => {
                 self.set_volume(f64::from(value));
+                self.dirty = true;
                 Ok(Reply::Ok)
             }
             Request::AdjustVolume { delta } => {
                 let v = (self.output.volume() + f64::from(delta)).clamp(0.0, 1.0);
                 self.set_volume(v);
+                self.dirty = true;
                 Ok(Reply::Ok)
             }
             Request::Clear => {
                 self.kill_decoder();
                 self.queue.clear();
+                // 当前是命名队列时同步清空它
+                if let Some(name) = self.queue_name.clone() {
+                    self.named.insert(name, Vec::new());
+                }
                 self.state = PlayState::Stopped;
                 self.seek_base_ms = 0;
+                self.dirty = true;
                 self.emit(Event::QueueChanged);
                 self.emit(Event::StateChanged {
                     state: PlayState::Stopped,
@@ -213,19 +311,103 @@ impl Engine {
             }
             Request::Remove { index } => {
                 let removed_current = self.queue.remove(index);
+                if let Some(name) = self.queue_name.clone()
+                    && let Some(items) = self.named.get_mut(&name) {
+                        items.remove(index);
+                    }
                 if removed_current {
                     self.stop();
                 }
+                self.dirty = true;
                 self.emit(Event::QueueChanged);
                 Ok(Reply::Ok)
             }
             Request::Shuffle => {
                 self.queue.shuffle();
+                if let Some(name) = self.queue_name.clone()
+                    && let Some(items) = self.named.get_mut(&name) {
+                        *items = self.queue.items.clone();
+                    }
+                self.dirty = true;
                 self.emit(Event::QueueChanged);
                 Ok(Reply::Status(Box::new(self.status())))
             }
-            // Add 由 daemon 层拦截扫描，不应到达这里
+            Request::PlaylistsList => {
+                let names = self.named.keys().cloned().collect();
+                Ok(Reply::Playlists {
+                    names,
+                    current: self.queue_name.clone(),
+                })
+            }
+            Request::PlaylistNew { name } => {
+                if self.named.contains_key(&name) {
+                    return Err(format!("队列 {name} 已存在"));
+                }
+                self.named.insert(name, Vec::new());
+                self.dirty = true;
+                Ok(Reply::Ok)
+            }
+            Request::PlaylistSave { name } => {
+                self.named.insert(name.clone(), self.queue.items.clone());
+                self.queue_name = Some(name);
+                self.dirty = true;
+                Ok(Reply::Ok)
+            }
+            Request::PlaylistPlay { name } => {
+                let Some(items) = self.named.get(&name) else {
+                    return Err(format!("队列 {name} 不存在"));
+                };
+                if items.is_empty() {
+                    return Err(format!("队列 {name} 是空的"));
+                }
+                let items = items.clone();
+                self.kill_decoder();
+                self.queue.items = items;
+                self.queue.current = None;
+                self.queue_name = Some(name);
+                self.dirty = true;
+                self.emit(Event::QueueChanged);
+                self.start_track(0, 0, true);
+                Ok(Reply::Status(Box::new(self.status())))
+            }
+            Request::PlaylistRemove { name } => {
+                if self.queue_name.as_deref() == Some(name.as_str()) {
+                    return Err(format!("队列 {name} 正在播放，无法删除"));
+                }
+                if self.named.remove(&name).is_none() {
+                    return Err(format!("队列 {name} 不存在"));
+                }
+                self.dirty = true;
+                Ok(Reply::Ok)
+            }
+            Request::SetRepeat { mode } => {
+                self.repeat = mode.unwrap_or(match self.repeat {
+                    RepeatMode::Off => RepeatMode::All,
+                    RepeatMode::All => RepeatMode::One,
+                    RepeatMode::One => RepeatMode::Off,
+                });
+                self.dirty = true;
+                self.emit(Event::ModeChanged {
+                    repeat: self.repeat,
+                    random: self.random,
+                });
+                Ok(Reply::Status(Box::new(self.status())))
+            }
+            Request::SetRandom { on } => {
+                self.random = on.unwrap_or(!self.random);
+                self.dirty = true;
+                self.emit(Event::ModeChanged {
+                    repeat: self.repeat,
+                    random: self.random,
+                });
+                Ok(Reply::Status(Box::new(self.status())))
+            }
+            // Add/Open/PlaylistAdd 由 daemon 层拦截扫描，不应到达这里
             Request::Add { .. } => Err("内部错误：Add 未在 daemon 层处理".into()),
+            Request::Open { .. } => Err("内部错误：Open 未在 daemon 层处理".into()),
+            Request::PlaylistAdd { .. } => {
+                Err("内部错误：PlaylistAdd 未在 daemon 层处理".into())
+            }
             // Quit 由 daemon 层处理，不应到达这里
             Request::Quit => Err("内部错误：Quit 未在 daemon 层处理".into()),
         }
@@ -274,21 +456,59 @@ impl Engine {
         });
     }
 
-    /// 下一曲（EOF 或用户）。队尾则停在 Stopped。
-    fn advance(&mut self) {
-        match self.queue.advance() {
-            Some(next) => self.start_track(next, 0, true),
+    /// 下一曲（EOF 自动推进）。单曲循环时重播当前曲；否则按模式选曲。
+    fn on_eof(&mut self) {
+        if self.repeat == RepeatMode::One && self.queue.current.is_some() {
+            let cur = self.queue.current.expect("已检查 Some");
+            self.start_track(cur, 0, true);
+            return;
+        }
+        // EOF 推进：只有 repeat all 才在队尾回绕
+        let wrap = self.repeat == RepeatMode::All;
+        match self.pick_next(wrap) {
+            Some(i) => self.start_track(i, 0, true),
             None => self.stop(),
         }
     }
 
-    /// 上一曲。
-    fn rewind(&mut self) {
-        if self.queue.is_empty() {
-            return;
+    /// 用户手动 next：单曲循环不拦（主动切歌），队尾总是回绕。
+    fn on_next(&mut self) {
+        match self.pick_next(true) {
+            Some(i) => self.start_track(i, 0, true),
+            None => self.stop(),
         }
-        let prev = self.queue.rewind().expect("rewind 在非空队列必有值");
-        self.start_track(prev, 0, true);
+    }
+
+    /// 用户手动 prev：顺序后退（随机模式下也是），队首停在第 0 曲。
+    fn on_prev(&mut self) {
+        match self.queue.prev_index() {
+            Some(i) => self.start_track(i, 0, true),
+            None => self.stop(),
+        }
+    }
+
+    /// 选下一曲下标。随机开启时随机挑（避开当前曲）；否则顺序，
+    /// 越过队尾时按 `wrap` 决定回绕到 0 还是 None（停止）。
+    fn pick_next(&self, wrap: bool) -> Option<usize> {
+        let len = self.queue.items.len();
+        if len == 0 {
+            return None;
+        }
+        if self.random && len > 1 {
+            let cur = self.queue.current;
+            let mut rng = queue::simple_rng();
+            loop {
+                let i = (queue::next_rand(&mut rng) as usize) % len;
+                if Some(i) != cur {
+                    return Some(i);
+                }
+            }
+        }
+        match self.queue.next_index() {
+            Some(i) => Some(i),
+            None if wrap => Some(0),
+            None => None,
+        }
     }
 
     fn seek(&mut self, position_ms: u64) {
@@ -320,6 +540,7 @@ impl Engine {
 
         self.queue.current = Some(index);
         self.seek_base_ms = position_ms;
+        self.dirty = true;
 
         // kill_decoder 已把计数 +1 作废旧线程；这里再 +1 作为新线程的代号
         let new_gen = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
@@ -393,6 +614,9 @@ impl Engine {
             volume: self.output.volume() as f32,
             queue_len: self.queue.len(),
             track: self.queue.current.and_then(|i| self.queue.track_info(i)),
+            repeat: self.repeat,
+            random: self.random,
+            queue_name: self.queue_name.clone(),
         }
     }
 }
