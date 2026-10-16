@@ -31,6 +31,8 @@ rubato = "5"
 audioadapter-buffers = "5"
 # 元数据（title/artist/album/duration）读取
 lofty = "0.25"
+# 库目录实时监听：Linux inotify / macOS FSEvents / Windows ReadDirectoryChangesW
+notify = "6"
 # daemon 的 socket server / TUI 的并发
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
 serde = { version = "1", features = ["derive"] }
