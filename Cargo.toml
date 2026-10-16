@@ -1,0 +1,44 @@
+[package]
+name = "rmus"
+version = "0.1.0"
+edition = "2024"
+description = "Client/server terminal music player: rmusd daemon + rmus TUI"
+license = "MIT"
+
+[lib]
+name = "rmus"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rmusd"
+path = "src/daemon/main.rs"
+
+[[bin]]
+name = "rmus"
+path = "src/client/main.rs"
+
+[dependencies]
+# 解码：probe + demux + 内建 codec（MP3/FLAC/Vorbis/WAV/ALAC/ADPCM）
+# TODO: opus/aac 接入 symphonia-adapter-libopus / symphonia-adapter-fdk-aac
+symphonia = { version = "0.6", features = ["all", "opt-simd"] }
+# 音频输出
+cpal = { version = "0.18", features = ["pipewire"] }
+# 解码线程 -> 声卡回调 的无锁环形缓冲
+rtrb = "0.3"
+# 文件采样率 != 设备采样率时的重采样（rubato::Fft, FixedSync::Input）
+rubato = "5"
+# 重采样时的 planar 缓冲 zero-copy 视图（rubato 5 的 Adapter 类型）
+audioadapter-buffers = "5"
+# 元数据（title/artist/album/duration）读取
+lofty = "0.25"
+# daemon 的 socket server / TUI 的并发
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+strip = "symbols"

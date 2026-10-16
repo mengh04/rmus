@@ -1,0 +1,248 @@
+//! rmus：客户端。当前提供 CLI 子命令；无参数时的 TUI 是下一步。
+
+use anyhow::{Context, Result, bail};
+use clap::{Parser, Subcommand};
+use rmus::client::Client;
+use rmus::proto::{PlayState, Request, StatusInfo, TrackInfo};
+use std::path::PathBuf;
+
+#[derive(Parser)]
+#[command(
+    name = "rmus",
+    version,
+    about = "rmus 客户端：无参数进入 TUI（未实现），带子命令则一次性控制 rmusd"
+)]
+struct Cli {
+    /// rmusd socket 路径（默认 $XDG_RUNTIME_DIR/rmus.sock）
+    #[arg(long, global = true)]
+    socket: Option<PathBuf>,
+    /// 连不上时不自动拉起 rmusd
+    #[arg(long, global = true)]
+    no_spawn: bool,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// 添加文件/目录到队列尾部（目录递归扫描）
+    Add { paths: Vec<PathBuf> },
+    /// 播放（可选队列下标，从 0 开始）
+    Play { index: Option<usize> },
+    /// 暂停
+    Pause,
+    /// 播放/暂停切换
+    Toggle,
+    /// 停止（保留队列）
+    Stop,
+    /// 下一曲
+    Next,
+    /// 上一曲
+    Prev,
+    /// 跳转：绝对 "1:23" / "90"（秒）；相对 "+10" / "-10"（秒）
+    Seek { target: String },
+    /// 音量 0-100："65"、"+10"、"-10"
+    Volume { target: String },
+    /// 显示当前状态
+    Status,
+    /// 列出队列
+    Queue,
+    /// 清空队列并停止
+    Clear,
+    /// 删除队列中的第 index 曲
+    Remove { index: usize },
+    /// 打乱队列（当前曲移到队首）
+    Shuffle,
+    /// 让 rmusd 退出
+    Quit,
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    let Some(command) = cli.command.as_ref() else {
+        // TUI 未实现前的占位：显示状态摘要
+        let mut client = connect(&cli)?;
+        print_status(&status_of(&mut client)?);
+        println!("\n(TUI 尚未实现，rmus --help 查看子命令)");
+        return Ok(());
+    };
+
+    let mut client = connect(&cli)?;
+    match command {
+        Command::Add { paths } => {
+            let value = client.request(Request::Add { paths: paths.clone() })?;
+            let added = value.get("added").and_then(|v| v.as_u64()).unwrap_or(0);
+            println!("已添加 {added} 首");
+        }
+        Command::Play { index } => {
+            print_status(&status_reply(client.request(Request::Play { index: *index })?)?);
+        }
+        Command::Pause => {
+            print_status(&status_reply(client.request(Request::Pause)?)?);
+        }
+        Command::Toggle => {
+            print_status(&status_reply(client.request(Request::TogglePlay)?)?);
+        }
+        Command::Stop => {
+            client.request(Request::Stop)?;
+            println!("已停止");
+        }
+        Command::Next => {
+            print_status(&status_reply(client.request(Request::Next)?)?);
+        }
+        Command::Prev => {
+            print_status(&status_reply(client.request(Request::Prev)?)?);
+        }
+        Command::Seek { target } => {
+            print_status(&status_reply(client.request(parse_seek(target)?)?)?);
+        }
+        Command::Volume { target } => {
+            client.request(parse_volume(target)?)?;
+            print_status(&status_of(&mut client)?);
+        }
+        Command::Status => {
+            print_status(&status_of(&mut client)?);
+        }
+        Command::Queue => {
+            let status = status_of(&mut client)?;
+            let value = client.request(Request::QueueList)?;
+            let tracks: Vec<TrackInfo> = serde_json::from_value(
+                value.get("tracks").cloned().unwrap_or_default(),
+            )
+            .context("解析队列失败")?;
+            for track in &tracks {
+                let marker = if Some(track.index) == status.current {
+                    "▶"
+                } else {
+                    " "
+                };
+                let artist = if track.artist.is_empty() {
+                    String::new()
+                } else {
+                    format!(" - {}", track.artist)
+                };
+                println!(
+                    "{marker} {:>3} {}{} [{}]",
+                    track.index,
+                    track.title,
+                    artist,
+                    fmt_mmss(track.duration_ms)
+                );
+            }
+        }
+        Command::Clear => {
+            client.request(Request::Clear)?;
+            println!("队列已清空");
+        }
+        Command::Remove { index } => {
+            client.request(Request::Remove { index: *index })?;
+            println!("已删除第 {index} 首");
+        }
+        Command::Shuffle => {
+            client.request(Request::Shuffle)?;
+            println!("队列已打乱");
+        }
+        Command::Quit => {
+            client.request(Request::Quit)?;
+            println!("rmusd 已退出");
+        }
+    }
+    Ok(())
+}
+
+fn connect(cli: &Cli) -> Result<Client> {
+    if cli.no_spawn {
+        Client::connect(cli.socket.clone())
+    } else {
+        Client::connect_or_spawn(cli.socket.clone())
+    }
+}
+
+fn status_of(client: &mut Client) -> Result<StatusInfo> {
+    serde_json::from_value(client.request(Request::Status)?).context("解析状态失败")
+}
+
+fn status_reply(value: serde_json::Value) -> Result<StatusInfo> {
+    serde_json::from_value(value).context("解析状态失败")
+}
+
+fn print_status(status: &StatusInfo) {
+    let state = match status.state {
+        PlayState::Playing => "▶ 播放中",
+        PlayState::Paused => "‖ 已暂停",
+        PlayState::Stopped => "■ 已停止",
+    };
+    let volume = (status.volume.clamp(0.0, 1.0) * 100.0).round() as u32;
+    match &status.track {
+        Some(track) => {
+            println!("{state}  {} - {}", track.title, track.artist);
+            println!(
+                "  {} / {}   音量 {volume}%   队列 {}/{}",
+                fmt_mmss(status.position_ms),
+                fmt_mmss(status.duration_ms),
+                status.current.map(|i| i + 1).unwrap_or(0),
+                status.queue_len
+            );
+        }
+        None => {
+            println!("{state}   音量 {volume}%   队列 {} 首", status.queue_len);
+        }
+    }
+}
+
+/// "2:35" -> 绝对；"90"（秒）-> 绝对；"+10"/"-10"（秒）-> 相对
+fn parse_seek(target: &str) -> Result<Request> {
+    let target = target.trim();
+    if let Some(delta) = target.strip_prefix('+').or_else(|| target.strip_prefix('-')) {
+        let sign = if target.starts_with('-') { -1 } else { 1 };
+        let secs: f64 = delta.parse().context("相对跳转格式：+10 / -10（秒）")?;
+        return Ok(Request::SeekRelative {
+            delta_ms: (secs * 1000.0).round() as i64 * sign,
+        });
+    }
+    if target.contains(':') {
+        let mut total_secs = 0u64;
+        for part in target.split(':') {
+            let n: u64 = part
+                .parse()
+                .with_context(|| format!("时间格式错误：{target}（应为 1:23 或 1:02:03）"))?;
+            total_secs = total_secs * 60 + n;
+        }
+        return Ok(Request::Seek {
+            position_ms: total_secs * 1000,
+        });
+    }
+    let secs: f64 = target.parse().context("跳转格式：秒数（90）、分秒（1:30）、相对（+10）")?;
+    Ok(Request::Seek {
+        position_ms: (secs * 1000.0).round() as u64,
+    })
+}
+
+fn parse_volume(target: &str) -> Result<Request> {
+    let target = target.trim();
+    if let Some(delta) = target.strip_prefix('+').or_else(|| target.strip_prefix('-')) {
+        let sign = if target.starts_with('-') { -1.0 } else { 1.0 };
+        let n: f64 = delta.parse().context("音量格式：65 / +10 / -10")?;
+        return Ok(Request::AdjustVolume {
+            delta: (n / 100.0) as f32 * sign,
+        });
+    }
+    let n: f64 = target.parse().context("音量格式：65 / +10 / -10")?;
+    if !(0.0..=100.0).contains(&n) {
+        bail!("音量范围 0-100");
+    }
+    Ok(Request::SetVolume {
+        value: (n / 100.0) as f32,
+    })
+}
+
+fn fmt_mmss(ms: u64) -> String {
+    let secs = ms / 1000;
+    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m:02}:{s:02}")
+    }
+}
