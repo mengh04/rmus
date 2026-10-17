@@ -42,6 +42,7 @@ clap = { version = "4", features = ["derive"] }
 # TUI 界面（crossterm 版本须与 ratatui 内部使用的 ratatui-crossterm 对齐）
 ratatui = "0.30"
 crossterm = "0.29"
+pinyin = "0.10"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # MPRIS（D-Bus 媒体播放器接口，系统媒体控制/键盘媒体键/播放器小组件）

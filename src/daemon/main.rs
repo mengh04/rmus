@@ -7,9 +7,9 @@
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use rmus::engine::{Engine, ToEngine};
-use rmus::engine::queue::QueueItem;
 use rmus::proto::{Reply, Request, RequestMsg, ServerMsg, TrackInfo};
-use rmus::{library, scan, socket_path};
+use rmus::library::{self, LibEntry};
+use rmus::{scan, socket_path};
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::PathBuf;
 use std::sync::mpsc as std_mpsc;
@@ -22,7 +22,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 mod mpris;
 
 /// 库索引共享状态（读多写少；临界区只是内存 Vec，std 锁足够）
-type Library = Arc<RwLock<Vec<QueueItem>>>;
+type Library = Arc<RwLock<Vec<LibEntry>>>;
 
 /// 事件防抖窗口：批量拷贝会爆发大量 inotify 事件，静默 2 秒后才扫一次
 const LIB_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(2);
