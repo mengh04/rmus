@@ -3,7 +3,7 @@
 //! - 改键 / 加键：改 [`resolve`] 的 match + [`HELP`] 里的说明即可
 //! - 帮助浮层直接从 [`HELP`] 生成，不会和实际键位对不上
 //!
-//! 输入模式（搜索、保存队列命名）的按键很少，直接写在 `app.rs`。
+//! 输入模式与搜索面板的按键很少，直接写在 `app.rs`。
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -49,7 +49,7 @@ pub enum Action {
     ToggleRandom,
     VolumeUp,
     VolumeDown,
-    /// 打开搜索输入（vim 命令行样式）
+    /// 打开搜索面板（telescope 式：实时过滤，Enter 插播）
     Search,
     /// 把当前队列保存为命名播放列表（输入名字）
     SavePlaylist,
@@ -134,7 +134,7 @@ pub const HELP: &[(&str, &str)] = &[
     ("r", "循环模式 关→列表→单曲"),
     ("z", "随机播放开关"),
     ("+ / -", "音量加减"),
-    ("/", "搜索库（回车搜索，再 Enter 播放）"),
+    ("/", "搜索库（实时过滤，Enter 插播，Esc 关闭）"),
     ("w", "当前队列存为播放列表"),
     ("B", "结束试听，恢复原队列"),
     ("R", "重建库索引"),

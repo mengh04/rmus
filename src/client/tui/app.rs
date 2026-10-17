@@ -38,10 +38,9 @@ impl Tab {
     }
 }
 
-/// 输入模式的用途（vim 命令行：`/` 搜索、`:w` 存播放列表）。
+/// 输入模式的用途（vim 命令行：`:w` 存播放列表）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputPurpose {
-    Search,
     SavePlaylist,
 }
 
@@ -49,7 +48,6 @@ impl InputPurpose {
     /// 底部命令行显示的前缀。
     pub fn prefix(self) -> &'static str {
         match self {
-            InputPurpose::Search => "/",
             InputPurpose::SavePlaylist => ":w ",
         }
     }
@@ -58,10 +56,12 @@ impl InputPurpose {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Normal,
+    /// Telescope 式搜索面板：输入与实时结果一体（`handle_search_key` 处理）
+    Search,
     Input(InputPurpose),
 }
 
-/// 搜索结果浮层；`None` = 未打开。
+/// 搜索面板状态；`None` = 未打开。与 [`Mode::Search`] 同生共死。
 pub struct SearchState {
     pub query: String,
     pub results: Vec<TrackInfo>,
@@ -144,10 +144,11 @@ impl App {
 
     // ---- 主循环接口 -------------------------------------------------------
 
-    /// 键盘事件入口：输入模式自己处理，Normal 模式查键位表。
+    /// 键盘事件入口：搜索面板 / 输入模式自己处理，Normal 模式查键位表。
     pub fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
         match self.mode {
             Mode::Input(_) => self.handle_input_key(key),
+            Mode::Search => self.handle_search_key(key),
             Mode::Normal => {
                 // 数字键切 tab（1 起始），其余交给键位表
                 if let (KeyModifiers::NONE, KeyCode::Char(c)) = (key.modifiers, key.code)
@@ -240,11 +241,9 @@ impl App {
             Quit => self.should_quit = true,
             Help => self.help_open = !self.help_open,
             Close => {
-                // 只关最上层的一层浮层
+                // Normal 模式下只剩帮助浮层（搜索面板由 Mode::Search 自己管）
                 if self.help_open {
                     self.help_open = false;
-                } else if self.search.is_some() {
-                    self.search = None;
                 }
             }
             NextTab => self.tab = self.tab.next(),
@@ -279,14 +278,7 @@ impl App {
             ToggleRandom => self.simple(Request::SetRandom { on: None }),
             VolumeUp => self.simple(Request::AdjustVolume { delta: 0.05 }),
             VolumeDown => self.simple(Request::AdjustVolume { delta: -0.05 }),
-            Search => {
-                let query = self
-                    .search
-                    .as_ref()
-                    .map(|s| s.query.clone())
-                    .unwrap_or_default();
-                self.enter_input(InputPurpose::Search, query);
-            }
+            Search => self.open_search(),
             SavePlaylist => {
                 let name = self.current_playlist.clone().unwrap_or_default();
                 self.enter_input(InputPurpose::SavePlaylist, name);
@@ -311,15 +303,11 @@ impl App {
 
     // ---- 列表选择与播放 ----------------------------------------------------
 
-    /// 当前活动列表（搜索结果浮层最优先）的长度。
+    /// 当前活动列表的长度（仅 Normal 模式；搜索面板的选择自己管）。
     fn active_len(&self) -> usize {
-        if let Some(search) = &self.search {
-            search.results.len()
-        } else {
-            match self.tab {
-                Tab::Queue => self.queue.len(),
-                Tab::Playlists => self.playlists.len(),
-            }
+        match self.tab {
+            Tab::Queue => self.queue.len(),
+            Tab::Playlists => self.playlists.len(),
         }
     }
 
@@ -328,13 +316,9 @@ impl App {
         if len == 0 {
             return;
         }
-        let base = if let Some(search) = &self.search {
-            search.selected
-        } else {
-            match self.tab {
-                Tab::Queue => self.queue_selected,
-                Tab::Playlists => self.playlists_selected,
-            }
+        let base = match self.tab {
+            Tab::Queue => self.queue_selected,
+            Tab::Playlists => self.playlists_selected,
         };
         let next = (base as i32 + delta).clamp(0, len as i32 - 1) as usize;
         self.set_selection(next);
@@ -343,25 +327,14 @@ impl App {
     fn set_selection(&mut self, index: usize) {
         let len = self.active_len();
         let index = index.min(len.saturating_sub(1));
-        if let Some(search) = &mut self.search {
-            search.selected = index;
-        } else {
-            match self.tab {
-                Tab::Queue => self.queue_selected = index,
-                Tab::Playlists => self.playlists_selected = index,
-            }
+        match self.tab {
+            Tab::Queue => self.queue_selected = index,
+            Tab::Playlists => self.playlists_selected = index,
         }
     }
 
     /// Enter：播放当前选中的东西。
     fn play_selected(&mut self) {
-        if let Some(search) = &self.search {
-            if let Some(track) = search.results.get(search.selected) {
-                let path = track.path.clone();
-                self.play_library_track(&path);
-            }
-            return;
-        }
         match self.tab {
             Tab::Queue => {
                 let index = self.queue_selected;
@@ -428,8 +401,104 @@ impl App {
         };
         clamp(&mut self.queue_selected, self.queue.len());
         clamp(&mut self.playlists_selected, self.playlists.len());
-        if let Some(search) = &mut self.search {
-            clamp(&mut search.selected, search.results.len());
+    }
+
+    // ---- 搜索面板（telescope 式）-------------------------------------------
+
+    /// `/` 打开：空 query 起步，边输入边过滤。
+    fn open_search(&mut self) {
+        self.search = Some(SearchState {
+            query: String::new(),
+            results: Vec::new(),
+            selected: 0,
+        });
+        self.mode = Mode::Search;
+    }
+
+    fn close_search(&mut self) {
+        self.search = None;
+        self.mode = Mode::Normal;
+    }
+
+    fn handle_search_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::KeyModifiers as KM;
+        // 先把按键翻译成意图再执行，避开借用冲突
+        enum Intent {
+            Keep,
+            Close,
+            /// 移动结果选中项
+            Select(i32),
+            /// query 变了，重新过滤
+            Edit,
+            Play(std::path::PathBuf),
+        }
+        let intent = match (key.modifiers, key.code) {
+            (KM::CONTROL, KeyCode::Char('c')) | (_, KeyCode::Esc) => Intent::Close,
+            (_, KeyCode::Enter) => self
+                .search
+                .as_ref()
+                .and_then(|s| s.results.get(s.selected))
+                .map_or(Intent::Keep, |t| Intent::Play(t.path.clone())),
+            // vim/telescope 习惯：C-j/C-k/C-n/C-p 或方向键移动
+            (KM::CONTROL, KeyCode::Char('j' | 'n')) | (KeyModifiers::NONE, KeyCode::Down) => {
+                Intent::Select(1)
+            }
+            (KM::CONTROL, KeyCode::Char('k' | 'p')) | (KeyModifiers::NONE, KeyCode::Up) => {
+                Intent::Select(-1)
+            }
+            (_, KeyCode::Backspace) => {
+                let search = self.search.as_mut().expect("Search 模式必有面板");
+                // 空 query 再退格 = 关闭面板
+                if search.query.pop().is_none() {
+                    Intent::Close
+                } else {
+                    Intent::Edit
+                }
+            }
+            (m, KeyCode::Char(c)) if !m.contains(KM::CONTROL) => {
+                self.search.as_mut().expect("Search 模式必有面板").query.push(c);
+                Intent::Edit
+            }
+            _ => Intent::Keep,
+        };
+        match intent {
+            Intent::Keep => {}
+            Intent::Close => self.close_search(),
+            Intent::Select(delta) => {
+                let len = self.search.as_ref().map_or(0, |s| s.results.len());
+                if len > 0 {
+                    let search = self.search.as_mut().expect("Search 模式必有面板");
+                    search.selected =
+                        (search.selected as i32 + delta).clamp(0, len as i32 - 1) as usize;
+                }
+            }
+            Intent::Edit => self.run_search(),
+            Intent::Play(path) => self.play_library_track(&path),
+        }
+    }
+
+    /// 实时过滤：当前 query -> daemon `Find` -> 刷新结果。
+    fn run_search(&mut self) {
+        let Some(query) = self
+            .search
+            .as_ref()
+            .map(|s| s.query.trim().to_string())
+            .filter(|q| !q.is_empty())
+        else {
+            if let Some(search) = &mut self.search {
+                search.results.clear();
+                search.selected = 0;
+            }
+            return;
+        };
+        match self.daemon.request(Request::Find { query }) {
+            Ok(value) => {
+                let results = parse_tracks(&value);
+                let search = self.search.as_mut().expect("Search 模式必有面板");
+                search.results = results;
+                search.selected = search.selected.min(search.results.len().saturating_sub(1));
+            }
+            Err(e) => self.notify(format!("{e}"), true),
         }
     }
 
@@ -460,8 +529,12 @@ impl App {
                 (_, KeyCode::Esc) => InputOutcome::Cancel,
                 (_, KeyCode::Enter) => InputOutcome::Confirm(buffer.clone()),
                 (_, KeyCode::Backspace) => {
-                    buffer.pop();
-                    InputOutcome::Keep
+                    // 空 buffer 再退格 = 退出输入（vim 命令行习惯）
+                    if buffer.pop().is_none() {
+                        InputOutcome::Cancel
+                    } else {
+                        InputOutcome::Keep
+                    }
                 }
                 (m, KeyCode::Char(c)) if !m.contains(KeyModifiers::CONTROL) => {
                     buffer.push(c);
@@ -482,29 +555,6 @@ impl App {
 
     fn confirm_input(&mut self, purpose: InputPurpose, text: &str) {
         match purpose {
-            InputPurpose::Search => {
-                let query = text.trim().to_string();
-                if query.is_empty() {
-                    self.search = None;
-                    return;
-                }
-                match self.daemon.request(Request::Find {
-                    query: query.clone(),
-                }) {
-                    Ok(value) => {
-                        let results = parse_tracks(&value);
-                        if results.is_empty() {
-                            self.notify(format!("没有匹配 “{query}” 的曲子"), true);
-                        }
-                        self.search = Some(SearchState {
-                            query,
-                            results,
-                            selected: 0,
-                        });
-                    }
-                    Err(e) => self.notify(format!("{e}"), true),
-                }
-            }
             InputPurpose::SavePlaylist => {
                 let name = text.trim().to_string();
                 if name.is_empty() {

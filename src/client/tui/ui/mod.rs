@@ -13,7 +13,7 @@
 //! │ 提示 / 消息 / 输入行                │
 //! └────────────────────────────────────┘
 //! ```
-//! 搜索结果与帮助是居中浮层。
+//! 搜索面板与帮助是居中浮层。
 
 mod header;
 mod help;
@@ -75,34 +75,40 @@ fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
 
 /// 底部一行：输入命令行 > 临时消息 > 键位速览。
 fn draw_status_line(frame: &mut Frame, app: &App, area: Rect) {
-    let line = match app.mode {
-        Mode::Input(purpose) => Line::from(vec![
-            Span::styled(purpose.prefix(), Style::default().fg(Color::Yellow).bold()),
-            Span::raw(app.input_buffer()),
-            Span::styled("▏", Style::default().add_modifier(Modifier::REVERSED)),
-        ]),
-        Mode::Normal => {
-            if let Some(msg) = app.message.as_ref().filter(|m| m.alive()) {
+    let message_line = |app: &App| {
+        app.message
+            .as_ref()
+            .filter(|m| m.alive())
+            .map(|msg| {
                 let style = if msg.error {
                     Style::default().fg(Color::Red)
                 } else {
                     Style::default().fg(Color::Green)
                 };
                 Line::from(Span::styled(format!(" {}", msg.text), style))
+            })
+    };
+    let line = match app.mode {
+        Mode::Input(purpose) => Line::from(vec![
+            Span::styled(purpose.prefix(), Style::default().fg(Color::Yellow).bold()),
+            Span::raw(app.input_buffer()),
+            Span::styled("▏", Style::default().add_modifier(Modifier::REVERSED)),
+        ]),
+        // 搜索面板自带输入行，底部只在有消息时显示
+        Mode::Search => message_line(app).unwrap_or_else(|| Line::from("")),
+        Mode::Normal => message_line(app).unwrap_or_else(|| {
+            let peek = if app.status.as_ref().is_some_and(|s| s.peeking) {
+                "  B 恢复原队列"
             } else {
-                let peek = if app.status.as_ref().is_some_and(|s| s.peeking) {
-                    "  B 恢复原队列"
-                } else {
-                    ""
-                };
-                Line::from(Span::styled(
-                    format!(
-                        " j/k 移动  空格 播放  n/p 切曲  / 搜索  w 存队列  Tab 切换  ? 帮助  q 退出{peek}"
-                    ),
-                    Style::default().add_modifier(Modifier::DIM),
-                ))
-            }
-        }
+                ""
+            };
+            Line::from(Span::styled(
+                format!(
+                    " j/k 移动  空格 播放  n/p 切曲  / 搜索  w 存队列  Tab 切换  ? 帮助  q 退出{peek}"
+                ),
+                Style::default().add_modifier(Modifier::DIM),
+            ))
+        }),
     };
     frame.render_widget(line, area);
 }
