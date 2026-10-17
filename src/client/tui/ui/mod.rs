@@ -17,6 +17,7 @@
 
 mod header;
 mod help;
+mod palette;
 mod playlists;
 mod queue;
 mod search;
@@ -47,6 +48,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // 浮层最后画（盖在主体上）
     if let Some(search) = &app.search {
         search::draw(frame, search);
+    }
+    if let Some(palette) = &app.palette {
+        palette::draw(frame, palette);
     }
     if app.help_open {
         help::draw(frame);
@@ -94,8 +98,8 @@ fn draw_status_line(frame: &mut Frame, app: &App, area: Rect) {
             Span::raw(app.input_buffer()),
             Span::styled("▏", Style::default().add_modifier(Modifier::REVERSED)),
         ]),
-        // 搜索面板自带输入行，底部只在有消息时显示
-        Mode::Search => message_line(app).unwrap_or_else(|| Line::from("")),
+        // 搜索/命令面板自带输入行，底部只在有消息时显示
+        Mode::Search | Mode::Command => message_line(app).unwrap_or_else(|| Line::from("")),
         Mode::Normal => message_line(app).unwrap_or_else(|| {
             let peek = if app.status.as_ref().is_some_and(|s| s.peeking) {
                 "  B 恢复原队列"

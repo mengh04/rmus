@@ -1,4 +1,4 @@
-//! `:` 命令面板：命令表、解析、Tab 补全。执行在 `app::App::run_command`。
+//! `:` 命令面板：命令表、解析、面板过滤。执行在 `app::App::run_command`。
 //!
 //! 设计取向：
 //! - 含空格的路径不用引号——`add` / `open` / `peek` / `pl add` 把"剩余整行"
@@ -9,7 +9,7 @@
 use crate::proto::RepeatMode;
 use std::path::PathBuf;
 
-/// 一条命令的说明（`:help` 展示 + Tab 补全；`names[0]` 是规范名）。
+/// 一条命令的说明（`:help` 展示 + 面板过滤；`names[0]` 是规范名）。
 pub struct Spec {
     pub names: &'static [&'static str],
     pub desc: &'static str,
@@ -160,14 +160,38 @@ pub fn parse(line: &str) -> Result<Cmd, String> {
     }
 }
 
-/// Tab 补全：所有以 `prefix` 开头的命令名（含别名）。
-pub fn complete(prefix: &str) -> Vec<&'static str> {
-    SPECS
+/// 按查询过滤命令（只看第一个词）：名称前缀 > 名称包含 > 描述包含，
+/// 同档保持 SPECS 顺序。空查询自然返回全部。
+pub fn filter(query: &str) -> Vec<&'static Spec> {
+    let q = query.split_whitespace().next().unwrap_or("").to_lowercase();
+    let mut scored: Vec<(u8, usize, &Spec)> = SPECS
         .iter()
-        .flat_map(|spec| spec.names.iter())
-        .filter(|name| name.starts_with(prefix))
-        .copied()
-        .collect()
+        .enumerate()
+        .filter_map(|(i, spec)| {
+            let name_hit = spec
+                .names
+                .iter()
+                .filter_map(|name| {
+                    let name = name.to_lowercase();
+                    if name.contains(&q) {
+                        Some(if name == q {
+                            3
+                        } else if name.starts_with(&q) {
+                            2
+                        } else {
+                            1
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .max();
+            let desc_hit = spec.desc.to_lowercase().contains(&q).then_some(0);
+            Some((name_hit.or(desc_hit)?, i, spec))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    scored.into_iter().map(|(_, _, spec)| spec).collect()
 }
 
 fn split_ws(line: &str) -> (&str, &str) {
@@ -373,11 +397,16 @@ mod tests {
     }
 
     #[test]
-    fn 补全() {
-        let v = complete("v");
-        assert!(v.contains(&"vol") && v.contains(&"volume"));
-        assert!(complete("pl").contains(&"playlist"));
-        assert!(complete("zzz").is_empty());
+    fn 过滤() {
+        // 空查询 = 全部，保持 SPECS 顺序
+        assert_eq!(filter("").len(), SPECS.len());
+        assert_eq!(filter("seek")[0].names[0], "seek");
+        // 名称包含与描述命中
+        assert!(filter("random").iter().any(|s| s.names.contains(&"rand")));
+        assert!(filter("播放").iter().any(|s| s.names.contains(&"play")));
+        assert!(filter("zzz").is_empty());
+        // 只看第一个词：带参数的行仍按命令名过滤
+        assert_eq!(filter("seek 30")[0].names[0], "seek");
     }
 
     fn home_join(rel: &str) -> PathBuf {

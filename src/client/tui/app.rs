@@ -38,10 +38,9 @@ impl Tab {
     }
 }
 
-/// 输入模式的用途（vim 命令行：`:command`、`:w` 存播放列表）。
+/// 输入模式的用途（vim 命令行：`:w` 存播放列表）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputPurpose {
-    Command,
     SavePlaylist,
 }
 
@@ -49,7 +48,6 @@ impl InputPurpose {
     /// 底部命令行显示的前缀。
     pub fn prefix(self) -> &'static str {
         match self {
-            InputPurpose::Command => ":",
             InputPurpose::SavePlaylist => ":w ",
         }
     }
@@ -60,6 +58,8 @@ pub enum Mode {
     Normal,
     /// Telescope 式搜索面板：输入与实时结果一体（`handle_search_key` 处理）
     Search,
+    /// Telescope 式命令面板（`handle_palette_key` 处理）
+    Command,
     Input(InputPurpose),
 }
 
@@ -68,6 +68,15 @@ pub struct SearchState {
     pub query: String,
     pub results: Vec<TrackInfo>,
     pub selected: usize,
+}
+
+/// `:` 命令面板状态；`None` = 未打开。与 [`Mode::Command`] 同生共死。
+/// 命令列表由 `cmd::filter(&input)` 现算，不存这里。
+pub struct CmdPalette {
+    pub input: String,
+    pub selected: usize,
+    /// 上次回车的解析错误（面板内展示；输入变化即清除）
+    pub error: Option<String>,
 }
 
 /// 底部状态行的临时消息。
@@ -101,8 +110,9 @@ pub struct App {
     pub queue_selected: usize,
     pub playlists_selected: usize,
     pub search: Option<SearchState>,
+    pub palette: Option<CmdPalette>,
 
-    // 命令行历史（内存；history_cursor = Some(i) 表示正在翻第 i 条）
+    // 命令历史（内存；history_cursor = Some(i) 表示正在翻第 i 条）
     cmd_history: Vec<String>,
     history_cursor: Option<usize>,
     history_draft: String,
@@ -132,6 +142,7 @@ impl App {
             queue_selected: 0,
             playlists_selected: 0,
             search: None,
+            palette: None,
             cmd_history: Vec::new(),
             history_cursor: None,
             history_draft: String::new(),
@@ -154,11 +165,12 @@ impl App {
 
     // ---- 主循环接口 -------------------------------------------------------
 
-    /// 键盘事件入口：搜索面板 / 输入模式自己处理，Normal 模式查键位表。
+    /// 键盘事件入口：面板 / 输入模式自己处理，Normal 模式查键位表。
     pub fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
         match self.mode {
             Mode::Input(_) => self.handle_input_key(key),
             Mode::Search => self.handle_search_key(key),
+            Mode::Command => self.handle_palette_key(key),
             Mode::Normal => {
                 // 数字键切 tab（1 起始），其余交给键位表
                 if let (KeyModifiers::NONE, KeyCode::Char(c)) = (key.modifiers, key.code)
@@ -289,7 +301,7 @@ impl App {
             VolumeUp => self.simple(Request::AdjustVolume { delta: 0.05 }),
             VolumeDown => self.simple(Request::AdjustVolume { delta: -0.05 }),
             Search => self.open_search(),
-            Command => self.enter_input(InputPurpose::Command, String::new()),
+            Command => self.open_palette(),
             SavePlaylist => {
                 let name = self.current_playlist.clone().unwrap_or_default();
                 self.enter_input(InputPurpose::SavePlaylist, name);
@@ -538,15 +550,6 @@ impl App {
         let Mode::Input(purpose) = self.mode else {
             return;
         };
-        // 命令行专属：↑↓ 翻历史、Tab 补全命令名
-        if purpose == InputPurpose::Command {
-            match (key.modifiers, key.code) {
-                (KeyModifiers::NONE, KeyCode::Up) => return self.history_prev(),
-                (KeyModifiers::NONE, KeyCode::Down) => return self.history_next(),
-                (KeyModifiers::NONE, KeyCode::Tab) => return self.complete_command(),
-                _ => {}
-            }
-        }
         let outcome = {
             let buffer = &mut self.input_buffer;
             match (key.modifiers, key.code) {
@@ -580,17 +583,6 @@ impl App {
 
     fn confirm_input(&mut self, purpose: InputPurpose, text: &str) {
         match purpose {
-            InputPurpose::Command => {
-                let line = text.trim();
-                if line.is_empty() {
-                    return;
-                }
-                self.remember_command(line.to_string());
-                match super::cmd::parse(line) {
-                    Ok(parsed) => self.run_command(parsed),
-                    Err(e) => self.notify(e, true),
-                }
-            }
             InputPurpose::SavePlaylist => {
                 let name = text.trim().to_string();
                 if name.is_empty() {
@@ -695,6 +687,178 @@ impl App {
         self.need_queue = true;
     }
 
+    // ---- `:` 命令面板 -------------------------------------------------------
+
+    /// `:` 打开：空输入起步，列出全部命令。
+    fn open_palette(&mut self) {
+        self.palette = Some(CmdPalette {
+            input: String::new(),
+            selected: 0,
+            error: None,
+        });
+        self.history_cursor = None;
+        self.mode = Mode::Command;
+    }
+
+    fn close_palette(&mut self) {
+        self.palette = None;
+        self.mode = Mode::Normal;
+    }
+
+    fn handle_palette_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::KeyModifiers as KM;
+        // 先把按键翻译成意图再执行，避开借用冲突
+        enum Intent {
+            Keep,
+            Close,
+            Confirm,
+            /// 移动命令列表选中项
+            Select(i32),
+            HistoryPrev,
+            HistoryNext,
+            /// Tab：把选中的命令名代入输入
+            Adopt,
+            Edit,
+        }
+        let intent = match (key.modifiers, key.code) {
+            (KM::CONTROL, KeyCode::Char('c')) | (_, KeyCode::Esc) => Intent::Close,
+            (_, KeyCode::Enter) => Intent::Confirm,
+            (_, KeyCode::Backspace) => {
+                let palette = self.palette.as_mut().expect("Command 模式必有面板");
+                // 空 input 再退格 = 关闭面板
+                if palette.input.pop().is_none() {
+                    Intent::Close
+                } else {
+                    palette.error = None;
+                    Intent::Edit
+                }
+            }
+            (KM::CONTROL, KeyCode::Char('j' | 'n')) => Intent::Select(1),
+            (KM::CONTROL, KeyCode::Char('k' | 'p')) => Intent::Select(-1),
+            (KeyModifiers::NONE, KeyCode::Up) => Intent::HistoryPrev,
+            (KeyModifiers::NONE, KeyCode::Down) => Intent::HistoryNext,
+            (KeyModifiers::NONE, KeyCode::Tab) => Intent::Adopt,
+            (m, KeyCode::Char(c)) if !m.contains(KM::CONTROL) => {
+                let palette = self.palette.as_mut().expect("Command 模式必有面板");
+                palette.input.push(c);
+                palette.error = None;
+                Intent::Edit
+            }
+            _ => Intent::Keep,
+        };
+        match intent {
+            Intent::Keep => {}
+            Intent::Close => self.close_palette(),
+            Intent::Confirm => self.confirm_palette(),
+            Intent::Select(delta) => {
+                let len = self
+                    .palette
+                    .as_ref()
+                    .map_or(0, |p| super::cmd::filter(&p.input).len());
+                if len > 0 {
+                    let palette = self.palette.as_mut().expect("Command 模式必有面板");
+                    palette.selected =
+                        (palette.selected as i32 + delta).clamp(0, len as i32 - 1) as usize;
+                }
+            }
+            Intent::HistoryPrev => {
+                let mut buffer = self
+                    .palette
+                    .as_mut()
+                    .map(|p| std::mem::take(&mut p.input))
+                    .unwrap_or_default();
+                self.history_prev(&mut buffer);
+                if let Some(palette) = self.palette.as_mut() {
+                    palette.input = buffer;
+                    palette.error = None;
+                }
+            }
+            Intent::HistoryNext => {
+                let mut buffer = self
+                    .palette
+                    .as_mut()
+                    .map(|p| std::mem::take(&mut p.input))
+                    .unwrap_or_default();
+                self.history_next(&mut buffer);
+                if let Some(palette) = self.palette.as_mut() {
+                    palette.input = buffer;
+                    palette.error = None;
+                }
+            }
+            Intent::Adopt => {
+                self.adopt_selected();
+            }
+            Intent::Edit => {
+                let palette = self.palette.as_mut().expect("Command 模式必有面板");
+                let len = super::cmd::filter(&palette.input).len();
+                palette.selected = palette.selected.min(len.saturating_sub(1));
+            }
+        }
+    }
+
+    /// 回车：能整体解析就直接执行并关闭；否则把选中的命令名代入输入
+    /// （进入参数模式）；代入不了才把解析错误显示在面板里。
+    fn confirm_palette(&mut self) {
+        let input = self
+            .palette
+            .as_ref()
+            .map(|p| p.input.trim().to_string())
+            .unwrap_or_default();
+        if input.is_empty() {
+            self.close_palette();
+            return;
+        }
+        match super::cmd::parse(&input) {
+            Ok(parsed) => {
+                self.remember_command(input);
+                self.close_palette();
+                self.run_command(parsed);
+            }
+            Err(e) => {
+                if !self.adopt_selected()
+                    && let Some(palette) = self.palette.as_mut()
+                {
+                    palette.error = Some(e);
+                }
+            }
+        }
+    }
+
+    /// 把选中的命令名代入输入（保留已输入的参数部分）。
+    /// 命令名已完整（错误出在参数）或无选中命令时不动，返回是否代入。
+    fn adopt_selected(&mut self) -> bool {
+        let input = self
+            .palette
+            .as_ref()
+            .map_or(String::new(), |p| p.input.clone());
+        let selected = self.palette.as_ref().map_or(0, |p| p.selected);
+        let first = input.split_whitespace().next().unwrap_or("");
+        let adopt = super::cmd::filter(&input)
+            .get(selected)
+            .and_then(|spec| {
+                if spec.names.contains(&first) {
+                    return None; // 名字已完整，错误出在参数
+                }
+                spec.names.iter().find(|n| n.starts_with(first)).copied()
+            });
+        let Some(name) = adopt else {
+            return false;
+        };
+        let rest = input
+            .split_once(char::is_whitespace)
+            .map(|(_, rest)| rest.trim())
+            .unwrap_or("");
+        if let Some(palette) = self.palette.as_mut() {
+            palette.input = if rest.is_empty() {
+                format!("{name} ")
+            } else {
+                format!("{name} {rest}")
+            };
+            palette.error = None;
+        }
+        true
+    }
+
     /// 回车后记忆命令（去重连续重复），并复位翻历史的游标。
     fn remember_command(&mut self, line: String) {
         self.history_cursor = None;
@@ -703,44 +867,32 @@ impl App {
         }
     }
 
-    fn history_prev(&mut self) {
+    fn history_prev(&mut self, buffer: &mut String) {
         if self.cmd_history.is_empty() {
             return;
         }
         self.history_cursor = match self.history_cursor {
             None => {
-                self.history_draft = std::mem::take(&mut self.input_buffer);
+                self.history_draft = std::mem::take(buffer);
                 Some(self.cmd_history.len() - 1)
             }
             Some(0) => return,
             Some(i) => Some(i - 1),
         };
-        self.input_buffer = self.cmd_history[self.history_cursor.unwrap()].clone();
+        *buffer = self.cmd_history[self.history_cursor.unwrap()].clone();
     }
 
-    fn history_next(&mut self) {
+    fn history_next(&mut self, buffer: &mut String) {
         let Some(cursor) = self.history_cursor else {
             return;
         };
         self.history_cursor = if cursor + 1 < self.cmd_history.len() {
-            self.input_buffer = self.cmd_history[cursor + 1].clone();
+            *buffer = self.cmd_history[cursor + 1].clone();
             Some(cursor + 1)
         } else {
-            self.input_buffer = std::mem::take(&mut self.history_draft);
+            *buffer = std::mem::take(&mut self.history_draft);
             None
         };
-    }
-
-    /// Tab：补全第一个词（命令名）。多个候选时列在消息行。
-    fn complete_command(&mut self) {
-        if self.input_buffer.contains(char::is_whitespace) {
-            return;
-        }
-        match super::cmd::complete(&self.input_buffer).as_slice() {
-            [] => {}
-            [only] => self.input_buffer = format!("{only} "),
-            many => self.notify(many.join("  "), false),
-        }
     }
 
     // ---- 杂项 --------------------------------------------------------------
