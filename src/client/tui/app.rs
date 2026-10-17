@@ -38,9 +38,10 @@ impl Tab {
     }
 }
 
-/// 输入模式的用途（vim 命令行：`:w` 存播放列表）。
+/// 输入模式的用途（vim 命令行：`:command`、`:w` 存播放列表）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputPurpose {
+    Command,
     SavePlaylist,
 }
 
@@ -48,6 +49,7 @@ impl InputPurpose {
     /// 底部命令行显示的前缀。
     pub fn prefix(self) -> &'static str {
         match self {
+            InputPurpose::Command => ":",
             InputPurpose::SavePlaylist => ":w ",
         }
     }
@@ -100,6 +102,11 @@ pub struct App {
     pub playlists_selected: usize,
     pub search: Option<SearchState>,
 
+    // 命令行历史（内存；history_cursor = Some(i) 表示正在翻第 i 条）
+    cmd_history: Vec<String>,
+    history_cursor: Option<usize>,
+    history_draft: String,
+
     pub help_open: bool,
     pub message: Option<Message>,
     pub should_quit: bool,
@@ -125,6 +132,9 @@ impl App {
             queue_selected: 0,
             playlists_selected: 0,
             search: None,
+            cmd_history: Vec::new(),
+            history_cursor: None,
+            history_draft: String::new(),
             help_open: false,
             message: None,
             should_quit: false,
@@ -279,17 +289,12 @@ impl App {
             VolumeUp => self.simple(Request::AdjustVolume { delta: 0.05 }),
             VolumeDown => self.simple(Request::AdjustVolume { delta: -0.05 }),
             Search => self.open_search(),
+            Command => self.enter_input(InputPurpose::Command, String::new()),
             SavePlaylist => {
                 let name = self.current_playlist.clone().unwrap_or_default();
                 self.enter_input(InputPurpose::SavePlaylist, name);
             }
-            Rescan => match self.daemon.request(Request::LibRescan) {
-                Ok(value) => {
-                    let added = value.get("added").and_then(|v| v.as_u64()).unwrap_or(0);
-                    self.notify(format!("库索引已重建：{added} 首"), false);
-                }
-                Err(e) => self.notify(format!("{e}"), true),
-            },
+            Rescan => self.rescan_library(),
         }
     }
 
@@ -299,6 +304,17 @@ impl App {
             self.notify(format!("{e}"), true);
         }
         self.need_status = true;
+    }
+
+    /// 全量重建库索引，完成后提示曲目数。
+    fn rescan_library(&mut self) {
+        match self.daemon.request(Request::LibRescan) {
+            Ok(value) => {
+                let added = value.get("added").and_then(|v| v.as_u64()).unwrap_or(0);
+                self.notify(format!("库索引已重建：{added} 首"), false);
+            }
+            Err(e) => self.notify(format!("{e}"), true),
+        }
     }
 
     // ---- 列表选择与播放 ----------------------------------------------------
@@ -522,6 +538,15 @@ impl App {
         let Mode::Input(purpose) = self.mode else {
             return;
         };
+        // 命令行专属：↑↓ 翻历史、Tab 补全命令名
+        if purpose == InputPurpose::Command {
+            match (key.modifiers, key.code) {
+                (KeyModifiers::NONE, KeyCode::Up) => return self.history_prev(),
+                (KeyModifiers::NONE, KeyCode::Down) => return self.history_next(),
+                (KeyModifiers::NONE, KeyCode::Tab) => return self.complete_command(),
+                _ => {}
+            }
+        }
         let outcome = {
             let buffer = &mut self.input_buffer;
             match (key.modifiers, key.code) {
@@ -555,6 +580,17 @@ impl App {
 
     fn confirm_input(&mut self, purpose: InputPurpose, text: &str) {
         match purpose {
+            InputPurpose::Command => {
+                let line = text.trim();
+                if line.is_empty() {
+                    return;
+                }
+                self.remember_command(line.to_string());
+                match super::cmd::parse(line) {
+                    Ok(parsed) => self.run_command(parsed),
+                    Err(e) => self.notify(e, true),
+                }
+            }
             InputPurpose::SavePlaylist => {
                 let name = text.trim().to_string();
                 if name.is_empty() {
@@ -565,6 +601,145 @@ impl App {
                 self.need_playlists = true;
                 self.notify(format!("当前队列已保存为 “{name}”"), false);
             }
+        }
+    }
+
+    // ---- `:` 命令面板 -------------------------------------------------------
+
+    /// 解析完成的命令 -> daemon 请求 / 本地状态。
+    fn run_command(&mut self, command: super::cmd::Cmd) {
+        use super::cmd::{Cmd, SeekTarget, VolumeTarget};
+        match command {
+            Cmd::QuitTui => self.should_quit = true,
+            Cmd::KillDaemon => {
+                let _ = self.daemon.request(Request::Quit);
+                self.should_quit = true;
+            }
+            Cmd::Play(index) => self.simple(Request::Play { index }),
+            Cmd::Pause => self.simple(Request::Pause),
+            Cmd::Seek(target) => match target {
+                SeekTarget::Abs(position_ms) => self.simple(Request::Seek { position_ms }),
+                SeekTarget::Rel(delta_ms) => self.simple(Request::SeekRelative { delta_ms }),
+            },
+            Cmd::Volume(target) => match target {
+                VolumeTarget::Set(value) => self.simple(Request::SetVolume { value }),
+                VolumeTarget::Adjust(delta) => self.simple(Request::AdjustVolume { delta }),
+            },
+            Cmd::Repeat(mode) => self.simple(Request::SetRepeat { mode }),
+            Cmd::Random(on) => self.simple(Request::SetRandom { on }),
+            Cmd::Add(path) => self.load_paths(|paths| Request::Add { paths }, path, "已加入队列"),
+            Cmd::Open(path) => {
+                self.load_paths(|paths| Request::Open { paths }, path, "已替换队列并播放")
+            }
+            Cmd::Peek(path) => {
+                self.load_paths(|paths| Request::Peek { paths }, path, "试听中，B 结束恢复")
+            }
+            Cmd::PlayMatch(query) => {
+                // 先查一次拿到最佳匹配的名字，用于插播提示（匹配逻辑同一份）
+                let best = self
+                    .daemon
+                    .request(Request::Find {
+                        query: query.clone(),
+                    })
+                    .ok()
+                    .and_then(|value| parse_tracks(&value).into_iter().next());
+                if let Err(e) = self.daemon.request(Request::PlayMatch { query }) {
+                    self.notify(format!("{e}"), true);
+                } else if let Some(track) = best {
+                    self.notify(format!("插播 {} - {}", track.title, track.artist), false);
+                }
+                self.need_status = true;
+                self.need_queue = true;
+            }
+            Cmd::PlaylistNew(name) => {
+                self.simple(Request::PlaylistNew { name: name.clone() });
+                self.need_playlists = true;
+                self.notify(format!("已创建播放列表 “{name}”"), false);
+            }
+            Cmd::PlaylistPlay(name) => {
+                self.simple(Request::PlaylistPlay { name });
+                self.need_playlists = true;
+                self.need_queue = true;
+            }
+            Cmd::PlaylistRemove(name) => {
+                self.simple(Request::PlaylistRemove { name: name.clone() });
+                self.need_playlists = true;
+                self.notify(format!("已删除播放列表 “{name}”"), false);
+            }
+            Cmd::PlaylistAdd { name, path } => {
+                self.simple(Request::PlaylistAdd {
+                    name: name.clone(),
+                    paths: vec![path],
+                });
+                self.need_playlists = true;
+                self.notify(format!("已加入播放列表 “{name}”"), false);
+            }
+            Cmd::Rescan => self.rescan_library(),
+            Cmd::Help => self.help_open = true,
+        }
+    }
+
+    /// add / open / peek 共用：路径扫描在 daemon 层，回复后刷新。
+    fn load_paths(
+        &mut self,
+        build: fn(Vec<std::path::PathBuf>) -> Request,
+        path: std::path::PathBuf,
+        done: &str,
+    ) {
+        if let Err(e) = self.daemon.request(build(vec![path])) {
+            self.notify(format!("{e}"), true);
+        } else {
+            self.notify(done, false);
+        }
+        self.need_status = true;
+        self.need_queue = true;
+    }
+
+    /// 回车后记忆命令（去重连续重复），并复位翻历史的游标。
+    fn remember_command(&mut self, line: String) {
+        self.history_cursor = None;
+        if self.cmd_history.last() != Some(&line) {
+            self.cmd_history.push(line);
+        }
+    }
+
+    fn history_prev(&mut self) {
+        if self.cmd_history.is_empty() {
+            return;
+        }
+        self.history_cursor = match self.history_cursor {
+            None => {
+                self.history_draft = std::mem::take(&mut self.input_buffer);
+                Some(self.cmd_history.len() - 1)
+            }
+            Some(0) => return,
+            Some(i) => Some(i - 1),
+        };
+        self.input_buffer = self.cmd_history[self.history_cursor.unwrap()].clone();
+    }
+
+    fn history_next(&mut self) {
+        let Some(cursor) = self.history_cursor else {
+            return;
+        };
+        self.history_cursor = if cursor + 1 < self.cmd_history.len() {
+            self.input_buffer = self.cmd_history[cursor + 1].clone();
+            Some(cursor + 1)
+        } else {
+            self.input_buffer = std::mem::take(&mut self.history_draft);
+            None
+        };
+    }
+
+    /// Tab：补全第一个词（命令名）。多个候选时列在消息行。
+    fn complete_command(&mut self) {
+        if self.input_buffer.contains(char::is_whitespace) {
+            return;
+        }
+        match super::cmd::complete(&self.input_buffer).as_slice() {
+            [] => {}
+            [only] => self.input_buffer = format!("{only} "),
+            many => self.notify(many.join("  "), false),
         }
     }
 

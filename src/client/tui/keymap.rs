@@ -51,6 +51,8 @@ pub enum Action {
     VolumeDown,
     /// 打开搜索面板（telescope 式：实时过滤，Enter 插播）
     Search,
+    /// 打开 `:` 命令行（解析见 `cmd.rs`）
+    Command,
     /// 把当前队列保存为命名播放列表（输入名字）
     SavePlaylist,
     /// 全量重建库索引
@@ -96,6 +98,7 @@ pub fn resolve(key: KeyEvent) -> Option<Action> {
             '+' | '=' => Some(VolumeUp),
             '-' => Some(VolumeDown),
             '/' => Some(Search),
+            ':' => Some(Command),
             'w' => Some(SavePlaylist),
             _ => None,
         },
@@ -135,6 +138,7 @@ pub const HELP: &[(&str, &str)] = &[
     ("z", "随机播放开关"),
     ("+ / -", "音量加减"),
     ("/", "搜索库（拼音/首字母，实时过滤）"),
+    (":", "命令面板（Tab 补全，↑↓ 历史，:help 列出）"),
     ("w", "当前队列存为播放列表"),
     ("B", "结束试听，恢复原队列"),
     ("R", "重建库索引"),
