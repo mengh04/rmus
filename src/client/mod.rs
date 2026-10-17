@@ -3,12 +3,14 @@
 //! CLI 与以后的 TUI 共用。当前为同步实现（std UnixStream），
 //! 每个连接上 daemon 也会推送事件行，读响应时会跳过它们。
 
-use crate::proto::{Request, RequestMsg};
+use crate::proto::{Event, Request, RequestMsg};
 use anyhow::{Context, Result, bail};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+pub mod tui;
 
 pub struct Client {
     stream: UnixStream,
@@ -85,7 +87,34 @@ impl Client {
             if let Some(error) = value.get("error").and_then(|v| v.as_str()) {
                 bail!("{error}");
             }
-            return Ok(value.get("result").cloned().unwrap_or(serde_json::Value::Null));
+            return Ok(value
+                .get("result")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null));
+        }
+    }
+
+    /// 在专用事件连接上阻塞等待 daemon 推送的下一条事件。
+    ///
+    /// 该连接只收不发；若读到响应行（理论不该出现）则跳过。
+    /// 返回 Err 表示连接已断开（daemon 退出）。
+    pub fn wait_event(&mut self) -> Result<Event> {
+        let mut buf = String::new();
+        loop {
+            buf.clear();
+            let n = self.reader.read_line(&mut buf)?;
+            if n == 0 {
+                bail!("与 rmusd 的连接已关闭");
+            }
+            let value: serde_json::Value = match serde_json::from_str(buf.trim_end()) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            // 带 id 的是响应行，此连接上不期望出现，跳过
+            if value.get("id").is_some() {
+                continue;
+            }
+            return serde_json::from_value(value).context("解析 daemon 事件失败");
         }
     }
 }

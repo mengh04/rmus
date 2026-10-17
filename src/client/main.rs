@@ -10,7 +10,7 @@ use std::path::PathBuf;
 #[command(
     name = "rmus",
     version,
-    about = "rmus 客户端：无参数进入 TUI（未实现），带子命令则一次性控制 rmusd"
+    about = "rmus 客户端：无参数进入 TUI，带子命令则一次性控制 rmusd"
 )]
 struct Cli {
     /// rmusd socket 路径（默认 $XDG_RUNTIME_DIR/rmus.sock）
@@ -114,18 +114,16 @@ fn main() -> Result<()> {
     }
 
     let Some(command) = cli.command.as_ref() else {
-        // 无子命令：带路径 = 直接播放（替换队列）；无路径 = TUI 占位摘要
-        let mut client = connect(&cli)?;
+        // 无子命令：带路径 = 直接播放（替换队列）；无路径 = 进入 TUI
         if !cli.paths.is_empty() {
+            let mut client = connect(&cli)?;
             let value = client.request(Request::Open {
                 paths: cli.paths.clone(),
             })?;
             print_status(&status_reply(value)?);
             return Ok(());
         }
-        print_status(&status_of(&mut client)?);
-        println!("\n(TUI 尚未实现，rmus --help 查看子命令)");
-        return Ok(());
+        return rmus::client::tui::run(cli.socket.clone(), cli.no_spawn);
     };
 
     let mut client = connect(&cli)?;
