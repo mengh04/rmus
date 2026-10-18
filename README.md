@@ -59,7 +59,9 @@ Run `rmus` with no subcommand to open the interactive player:
 - `d` removes the selected track, `D` / `x` remove the playing one, `C` clears, `S` shuffles
 - `c` renames the current queue (an anonymous queue gets its first name; a named one keeps its
   history under the new name)
-- In the search overlay, `Enter` jump-plays and `Tab` appends to the queue without playing
+- In the search overlay: `Enter` jump-plays, `C-o` plays it after the current track, `Tab`
+  appends to the end of the queue without playing, `C-g` locates the track in the library view;
+  `C-u` clears the query and `C-w` deletes the last word
 - In the playlists view, `c` renames and `d` deletes the selected playlist
 
 While an overlay is open the terminal cursor moves into its input line; everywhere else it is hidden.

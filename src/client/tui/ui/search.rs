@@ -18,7 +18,7 @@ const MAX_ROWS: u16 = 12;
 pub fn draw(frame: &mut Frame, search: &SearchState, playing: Option<&std::path::Path>) {
     let theme = Theme::get();
     let rows = (search.results.len() as u16).clamp(1, MAX_ROWS);
-    let p = popup(frame, theme, 62, rows + POPUP_CHROME);
+    let p = popup(frame, theme, 68, rows + POPUP_CHROME);
     if p.title.is_empty() {
         return;
     }
@@ -92,9 +92,10 @@ pub fn draw(frame: &mut Frame, search: &SearchState, playing: Option<&std::path:
         let hints = key_hints(
             theme,
             &[
-                ("↑↓", "选择"),
                 ("Enter", "插播"),
+                ("C-o", "下一首"),
                 ("Tab", "入队"),
+                ("C-g", "定位"),
                 ("Esc", "关闭"),
             ],
             p.hint.width.saturating_sub(4),
