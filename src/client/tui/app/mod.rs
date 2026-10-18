@@ -267,7 +267,7 @@ impl App {
                         _ => self.playlists_selected,
                     };
                     self.visual = Some(VisualSel { anchor });
-                    self.notify("-- VISUAL -- d 剪切 · y 复制 · o 对调 · Esc 退出", false);
+                    self.notify("-- VISUAL -- 已选中当前行 · 移动扩选 · d 剪切 / y 复制", false);
                 } else if let Some(action) = keymap::resolve(key) {
                     self.execute(action);
                 }
