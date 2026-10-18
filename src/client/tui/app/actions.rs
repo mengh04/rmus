@@ -53,7 +53,12 @@ impl App {
             },
             MoveUp => self.move_selected(-1),
             MoveDown => self.move_selected(1),
-            AddSelected => self.add_selected_to_queue(),
+            AddSelected => match self.tab {
+                // 播放列表视图：a 新建播放列表
+                Tab::Playlists => self.enter_input(InputPurpose::NewPlaylist, String::new()),
+                _ => self.add_selected_to_queue(),
+            },
+            AddToCurrentPlaylist => self.add_selection_to_current_playlist(),
             RenameSelected => match self.tab {
                 // 队列视图：改的是当前队列的名字（匿名队列 = 首次命名）
                 Tab::Queue => {

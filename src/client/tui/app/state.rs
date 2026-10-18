@@ -44,6 +44,8 @@ pub enum InputPurpose {
     SavePlaylist,
     /// 重命名播放列表（携带旧名，确认时发 PlaylistRename）
     RenamePlaylist(String),
+    /// 新建空播放列表（播放列表 tab 按 a）
+    NewPlaylist,
     /// 在线搜索关键词（确认时走插件的 search）
     OnlineSearch,
 }
@@ -54,6 +56,7 @@ impl InputPurpose {
         match self {
             InputPurpose::SavePlaylist => ":w ",
             InputPurpose::RenamePlaylist(_) => ":rename ",
+            InputPurpose::NewPlaylist => "新建 ",
             InputPurpose::OnlineSearch => "/ ",
         }
     }
@@ -66,6 +69,8 @@ pub enum Mode {
     Search,
     /// Telescope 式命令面板（`palette::handle_key` 处理）
     Command,
+    /// 候选列表：输入模糊过滤，Enter 确认（`picker::handle_key` 处理）
+    Picker,
     Input(InputPurpose),
 }
 
@@ -173,6 +178,67 @@ pub struct CmdPalette {
     pub selected: usize,
     /// 上次回车的解析错误（面板内展示；输入变化即清除）
     pub error: Option<String>,
+}
+
+/// 候选列表（telescope 式）：输入即模糊过滤，Enter 确认选中项。
+/// 通用组件：label 展示、value 是确认时交给动作的载荷（如播放列表名）。
+#[derive(Clone)]
+pub struct CandidateItem {
+    pub label: String,
+    pub value: String,
+}
+
+#[derive(Clone)]
+pub struct CandidatePicker {
+    /// 浮层标题，如 "加入播放列表（3 首）"
+    pub title: String,
+    pub input: String,
+    /// 全量候选（确认时输入若不匹配任何 label，按新名字处理）
+    pub items: Vec<CandidateItem>,
+    pub selected: usize,
+}
+
+impl CandidatePicker {
+    /// 输入过滤后的候选下标（得分降序，同分保持原序）。
+    pub fn filtered(&self) -> Vec<usize> {
+        let query = self.input.trim();
+        let mut scored: Vec<(i64, usize)> = self
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(i, item)| fuzzy_score(&item.label, query).map(|s| (s, i)))
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        scored.into_iter().map(|(_, i)| i).collect()
+    }
+
+    /// 当前高亮的候选（过滤后越界时夹紧）。
+    pub fn picked(&self) -> Option<&CandidateItem> {
+        let filtered = self.filtered();
+        filtered
+            .get(self.selected.min(filtered.len().saturating_sub(1)))
+            .and_then(|i| self.items.get(*i))
+    }
+}
+
+/// 候选列表的模糊打分：完全相等 > 前缀 > 包含 > 子序列；空查询全中。
+fn fuzzy_score(label: &str, query: &str) -> Option<i64> {
+    let label = label.to_lowercase();
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return Some(0);
+    }
+    if label == query {
+        Some(1000)
+    } else if label.starts_with(&query) {
+        Some(100)
+    } else if label.contains(&query) {
+        Some(50)
+    } else if query.chars().all(|q| label.chars().any(|l| l == q)) {
+        Some(10)
+    } else {
+        None
+    }
 }
 
 /// 底部状态行的临时消息。

@@ -80,6 +80,8 @@ fn keys_for(tab: Tab) -> &'static [(&'static str, &'static str)] {
             ("j/k", "移动"),
             ("Enter", "插播"),
             ("a", "入队"),
+            ("A", "加入当前列表"),
+            ("v", "多选"),
             ("/", "搜索"),
             (":", "命令"),
             ("?", "帮助"),
@@ -87,6 +89,7 @@ fn keys_for(tab: Tab) -> &'static [(&'static str, &'static str)] {
         Tab::Playlists => &[
             ("j/k", "移动"),
             ("Enter", "播放"),
+            ("a", "新建"),
             ("c", "改名"),
             ("d", "删除"),
             ("w", "存队列"),

@@ -95,6 +95,16 @@ impl App {
                 self.need_playlists = true;
                 self.notify(format!("“{from}” 已重命名为 “{to}”"), false);
             }
+            InputPurpose::NewPlaylist => {
+                let name = text.trim().to_string();
+                if name.is_empty() {
+                    self.notify("播放列表名不能为空", true);
+                    return;
+                }
+                self.simple(Request::PlaylistNew { name: name.clone() });
+                self.need_playlists = true;
+                self.notify(format!("已创建空播放列表 “{name}”"), false);
+            }
             InputPurpose::OnlineSearch => {
                 self.run_online_search(text);
             }

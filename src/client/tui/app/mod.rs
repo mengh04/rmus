@@ -18,13 +18,14 @@ mod command;
 mod input;
 mod online;
 mod palette;
+mod picker;
 mod search;
 mod selection;
 mod state;
 
 pub use state::{
-    AsyncReply, CmdPalette, DownloadState, DownloadStatus, InputPurpose, Message, Mode,
-    OnlineSong, OnlineState, PluginInfo, SearchMode, SearchState, Tab,
+    AsyncReply, CandidatePicker, CmdPalette, DownloadState, DownloadStatus,
+    InputPurpose, Message, Mode, OnlineSong, OnlineState, PluginInfo, SearchMode, SearchState, Tab,
 };
 
 use super::conn::{Daemon, Feed};
@@ -33,6 +34,7 @@ use crate::proto::{Event, RepeatMode, Request, StatusInfo, TrackInfo};
 use crossterm::event::{KeyCode, KeyModifiers};
 use state::parse_tracks;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::mpsc::{Sender, channel};
 
 pub struct App {
@@ -67,6 +69,9 @@ pub struct App {
     pub playlists_selected: usize,
     pub search: Option<SearchState>,
     pub palette: Option<CmdPalette>,
+    /// 候选列表（telescope 式）；确认动作所需的附加数据在 `picker_paths`
+    pub picker: Option<CandidatePicker>,
+    picker_paths: Vec<PathBuf>,
 
     // 纯展示态（只由 ui 层读写）：列表滚动位置、帮助滚动
     pub scroll_queue: usize,
@@ -157,6 +162,8 @@ impl App {
             playlists_selected: 0,
             search: None,
             palette: None,
+            picker: None,
+            picker_paths: Vec::new(),
             scroll_queue: 0,
             scroll_library: 0,
             scroll_playlists: 0,
@@ -202,6 +209,7 @@ impl App {
             Mode::Input(_) => self.handle_input_key(key),
             Mode::Search => self.handle_search_key(key),
             Mode::Command => self.handle_palette_key(key),
+            Mode::Picker => self.handle_picker_key(key),
             Mode::Normal => {
                 // 帮助浮层打开时，j/k/g/G 只滚帮助，不动列表选中项
                 if self.help_open
@@ -231,6 +239,15 @@ impl App {
                         }
                         (KM::NONE, KeyCode::Char('o')) => {
                             self.visual_swap_ends();
+                            true
+                        }
+                        // 音乐库选段：a 加入指定播放列表（候选列表）、A 加入当前播放列表
+                        (KM::NONE, KeyCode::Char('a')) if self.tab == Tab::Library => {
+                            self.add_selection_to_playlist_picker();
+                            true
+                        }
+                        (KM::SHIFT, KeyCode::Char('A')) if self.tab == Tab::Library => {
+                            self.add_selection_to_current_playlist();
                             true
                         }
                         (KM::NONE, KeyCode::Char('v')) | (KM::SHIFT, KeyCode::Char('V')) => {
@@ -292,7 +309,12 @@ impl App {
                         _ => self.playlists_selected,
                     };
                     self.visual = Some(VisualSel { anchor });
-                    self.notify("-- VISUAL -- 已选中当前行 · 移动扩选 · d 剪切 / y 复制", false);
+                    let hint = if self.tab == Tab::Library {
+                        "-- VISUAL -- 移动扩选 · a 加入播放列表 · A 加入当前列表 · Esc 退出"
+                    } else {
+                        "-- VISUAL -- 已选中当前行 · 移动扩选 · d 剪切 / y 复制"
+                    };
+                    self.notify(hint, false);
                 } else if let Some(action) = keymap::resolve(key) {
                     self.execute(action);
                 }

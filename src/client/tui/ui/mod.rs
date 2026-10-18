@@ -30,6 +30,7 @@ mod list;
 mod now_playing;
 mod online;
 mod palette;
+mod picker;
 mod playlists;
 mod queue;
 mod search;
@@ -136,6 +137,9 @@ fn draw_overlays(frame: &mut Frame, app: &mut App) {
     }
     if let Some(palette) = &app.palette {
         palette::draw(frame, palette);
+    }
+    if let Some(picker) = &app.picker {
+        picker::draw(frame, picker);
     }
     if app.help_open {
         help::draw(frame, &mut app.help_scroll);

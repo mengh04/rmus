@@ -45,6 +45,8 @@ pub enum Action {
     MoveDown,
     /// 把选中曲目加到队列尾部（音乐库视图；不打断播放）
     AddSelected,
+    /// 音乐库：把选中曲（visual 选段或单曲）加入当前播放列表
+    AddToCurrentPlaylist,
     /// 重命名：当前队列（队列视图）或选中的播放列表
     RenameSelected,
     /// 清空队列
@@ -111,6 +113,8 @@ pub fn resolve(key: KeyEvent) -> Option<Action> {
             'R' => Some(Rescan),
             'J' => Some(MoveDown),
             'K' => Some(MoveUp),
+            // 音乐库：选中曲加入当前播放列表
+            'A' => Some(AddToCurrentPlaylist),
             // vim N：上一个匹配 ≈ 上一曲
             'N' => Some(Prev),
             // vim P：put 到队列光标前
@@ -191,6 +195,8 @@ pub const HELP: &[(&str, &str)] = &[
     ("p / P", "粘贴到队列光标后 / 前（dd 剪切的也能贴）"),
     ("J / K", "队列内上移 / 下移选中曲"),
     ("a", "把选中曲加入队列（音乐库 / 搜索里 Tab 同效）"),
+    ("A", "音乐库：选中曲加入当前播放列表"),
+    ("v 后 a", "音乐库选段加入指定播放列表（候选列表，可输新名）"),
     ("c", "重命名：当前队列 / 选中的播放列表"),
     ("C", "清空队列"),
     ("S", "打乱队列"),
