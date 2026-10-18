@@ -39,17 +39,20 @@ pub struct App {
     // 缓存的 daemon 状态（refresh_if_needed 按需更新）
     pub status: Option<StatusInfo>,
     pub queue: Vec<TrackInfo>,
+    pub library: Vec<TrackInfo>,
     pub playlists: Vec<String>,
     pub current_playlist: Option<String>,
 
     // 每个列表的选中下标（列表空时为 0，渲染时注意 len==0）
     pub queue_selected: usize,
+    pub library_selected: usize,
     pub playlists_selected: usize,
     pub search: Option<SearchState>,
     pub palette: Option<CmdPalette>,
 
     // 纯展示态（只由 ui 层读写）：列表滚动位置、帮助滚动
     pub scroll_queue: usize,
+    pub scroll_library: usize,
     pub scroll_playlists: usize,
     pub help_scroll: usize,
     // 首次载入后把选中项定位到正在播放的曲目/歌单，之后不再抢焦点
@@ -69,6 +72,7 @@ pub struct App {
     // 按需刷新标记
     need_status: bool,
     need_queue: bool,
+    need_library: bool,
     need_playlists: bool,
 }
 
@@ -81,13 +85,16 @@ impl App {
             tab: Tab::Queue,
             status: None,
             queue: Vec::new(),
+            library: Vec::new(),
             playlists: Vec::new(),
             current_playlist: None,
             queue_selected: 0,
+            library_selected: 0,
             playlists_selected: 0,
             search: None,
             palette: None,
             scroll_queue: 0,
+            scroll_library: 0,
             scroll_playlists: 0,
             help_scroll: 0,
             seeded_queue: false,
@@ -101,6 +108,7 @@ impl App {
             fatal: None,
             need_status: false,
             need_queue: false,
+            need_library: false,
             need_playlists: false,
         }
     }
@@ -109,6 +117,7 @@ impl App {
     pub fn startup(&mut self) {
         self.need_status = true;
         self.need_queue = true;
+        self.need_library = true;
         self.need_playlists = true;
     }
 
@@ -183,6 +192,13 @@ impl App {
                 self.queue = parse_tracks(&value);
                 self.clamp_selections();
                 self.seed_queue_selection();
+            }
+        }
+        if self.need_library {
+            self.need_library = false;
+            if let Ok(value) = self.daemon.request(Request::LibList) {
+                self.library = parse_tracks(&value);
+                self.clamp_selections();
             }
         }
         if self.need_playlists {

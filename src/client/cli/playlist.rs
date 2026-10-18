@@ -52,6 +52,13 @@ pub(crate) fn handle_pl(client: &mut Client, pl: &Pl) -> Result<()> {
             client.request(Request::PlaylistRemove { name: name.clone() })?;
             println!("队列 {name} 已删除");
         }
+        Pl::Rename { from, to } => {
+            client.request(Request::PlaylistRename {
+                from: from.clone(),
+                to: to.clone(),
+            })?;
+            println!("队列 {from} 已重命名为 {to}");
+        }
     }
     Ok(())
 }

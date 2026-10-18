@@ -56,6 +56,8 @@ enum Command {
     Clear,
     /// 删除队列中的曲子：无参数 = 删掉正在播放的这首（自动续播下一首）；数字 = 删第 index 首
     Remove { index: Option<usize> },
+    /// 调整队列顺序：把第 from 首移到第 to 的位置（下标从 0 开始）
+    Move { from: usize, to: usize },
     /// 打乱队列（当前曲移到队首）
     Shuffle,
     /// 循环模式：无参数循环切换 off -> all -> one -> off；或直接指定
@@ -92,6 +94,8 @@ enum Pl {
     Add { name: String, paths: Vec<PathBuf> },
     /// 删除命名队列（正在播放的除外）
     Remove { name: String },
+    /// 重命名命名队列（正在播放的跟随改名）
+    Rename { from: String, to: String },
 }
 
 #[derive(Subcommand)]

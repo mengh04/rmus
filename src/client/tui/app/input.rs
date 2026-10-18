@@ -1,4 +1,4 @@
-//! 单行输入模式（目前只有 `:w` 存播放列表）。
+//! 单行输入模式（`:w` 存播放列表、`c` 重命名）。
 
 use super::{App, InputPurpose, Mode};
 use crate::proto::Request;
@@ -20,7 +20,8 @@ impl App {
             Confirm(String),
             Cancel,
         }
-        let Mode::Input(purpose) = self.mode else {
+        // Mode 带 InputPurpose（含 String）：克隆出来用，避免借用冲突
+        let Mode::Input(purpose) = self.mode.clone() else {
             return;
         };
         let outcome = {
@@ -62,9 +63,37 @@ impl App {
                     self.notify("播放列表名不能为空", true);
                     return;
                 }
+                // 当前队列已有名字且改了名：走重命名，旧名字条目不残留
+                if let Some(prev) = self.current_playlist.clone()
+                    && prev != name
+                {
+                    self.simple(Request::PlaylistRename {
+                        from: prev.clone(),
+                        to: name.clone(),
+                    });
+                    self.need_playlists = true;
+                    self.notify(format!("“{prev}” 已重命名为 “{name}”"), false);
+                    return;
+                }
                 self.simple(Request::PlaylistSave { name: name.clone() });
                 self.need_playlists = true;
                 self.notify(format!("当前队列已保存为 “{name}”"), false);
+            }
+            InputPurpose::RenamePlaylist(from) => {
+                let to = text.trim().to_string();
+                if to.is_empty() {
+                    self.notify("播放列表名不能为空", true);
+                    return;
+                }
+                if to == from {
+                    return;
+                }
+                self.simple(Request::PlaylistRename {
+                    from: from.clone(),
+                    to: to.clone(),
+                });
+                self.need_playlists = true;
+                self.notify(format!("“{from}” 已重命名为 “{to}”"), false);
             }
         }
     }

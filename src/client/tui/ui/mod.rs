@@ -17,7 +17,7 @@
 //!
 //! 子模块：
 //! - [`theme`] / [`widgets`]：调色板与共用零件（两者都有自己的子模块）
-//! - [`header`] / [`queue`] / [`playlists`] / [`now_playing`] / [`status`]：页面各区块
+//! - [`header`] / [`queue`] / [`library`] / [`playlists`] / [`now_playing`] / [`status`]：页面各区块
 //! - [`search`] / [`palette`] / [`help`]：浮层
 //! - [`list`]：列表视口的滚动窗口
 //!
@@ -25,6 +25,7 @@
 
 mod header;
 mod help;
+mod library;
 mod list;
 mod now_playing;
 mod palette;
@@ -73,6 +74,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     header::draw(frame, app, areas.top_bar);
     match app.tab {
         Tab::Queue => queue::draw(frame, app, page_inset(areas.content)),
+        Tab::Library => library::draw(frame, app, page_inset(areas.content)),
         Tab::Playlists => playlists::draw(frame, app, page_inset(areas.content)),
     }
 

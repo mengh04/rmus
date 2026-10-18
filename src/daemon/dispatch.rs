@@ -44,6 +44,31 @@ pub(crate) async fn dispatch(
         return;
     }
 
+    // 整库列表：查索引直接回（不进引擎）
+    if matches!(msg.request, Request::LibList) {
+        let tracks = {
+            let lib = library.read().unwrap();
+            lib.iter()
+                .enumerate()
+                .map(|(i, entry)| TrackInfo {
+                    index: i,
+                    path: entry.item.path.clone(),
+                    title: entry.item.title.clone(),
+                    artist: entry.item.artist.clone(),
+                    album: entry.item.album.clone(),
+                    duration_ms: entry.item.duration_ms,
+                })
+                .collect()
+        };
+        let json = serde_json::to_string(&ServerMsg::Reply {
+            id,
+            result: Reply::Matches { tracks },
+        })
+        .unwrap_or_default();
+        let _ = out_tx.send(json);
+        return;
+    }
+
     // 库模糊播放：最佳匹配转引擎插播
     if let Request::PlayMatch { query } = msg.request {
         let best = {

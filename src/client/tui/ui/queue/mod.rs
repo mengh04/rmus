@@ -3,8 +3,8 @@
 //! 列宽按终端宽度分三档（完整 / 去掉专辑 / 只留曲名），
 //! 所有文字都按显示宽度截断，中文不会把列挤歪。
 
-mod columns;
-mod row;
+pub(super) mod columns;
+pub(super) mod row;
 
 use super::super::app::App;
 use super::list::window;
@@ -27,7 +27,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
             theme,
             area,
             "队列是空的",
-            "按 / 搜索音乐库，或 :add <路径> 加入文件",
+            "按 2 打开音乐库：Enter 插播，a 只入队；或 :add <路径>",
         );
         return;
     }

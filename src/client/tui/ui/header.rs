@@ -54,6 +54,7 @@ fn left_line(app: &App, theme: &Theme, width: u16) -> Line<'static> {
         let active = *tab == app.tab;
         let count = match tab {
             Tab::Queue => app.queue.len(),
+            Tab::Library => app.library.len(),
             Tab::Playlists => app.playlists.len(),
         };
         let label = format!(" {} {} {} ", i + 1, tab.title(), count);

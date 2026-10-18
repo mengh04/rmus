@@ -91,7 +91,12 @@ pub fn draw(frame: &mut Frame, search: &SearchState, playing: Option<&std::path:
     if !p.hint.is_empty() {
         let hints = key_hints(
             theme,
-            &[("↑↓", "选择"), ("Enter", "插播"), ("Esc", "关闭")],
+            &[
+                ("↑↓", "选择"),
+                ("Enter", "插播"),
+                ("Tab", "入队"),
+                ("Esc", "关闭"),
+            ],
             p.hint.width.saturating_sub(4),
         );
         frame.render_widget(

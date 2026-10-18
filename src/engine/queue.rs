@@ -83,6 +83,32 @@ impl Queue {
         self.current = keep.map(|_| 0);
     }
 
+    /// 把第 from 曲移到第 to 的位置（0 起），中间的曲顺延。
+    /// 当前曲被移动时跟随，其余情形修正下标保证 current 仍指向同一曲。
+    /// 返回 Err 表示下标越界。
+    pub fn move_item(&mut self, from: usize, to: usize) -> Result<(), String> {
+        let len = self.items.len();
+        if from >= len || to >= len {
+            return Err(format!("下标超出队列范围（0..{len}）"));
+        }
+        if from == to {
+            return Ok(());
+        }
+        let item = self.items.remove(from);
+        self.items.insert(to, item);
+        if let Some(c) = self.current {
+            // 当前曲就是被移动的曲：直接跟到新位置；否则先按"删除 from"
+            // 收缩，再按"插入 to"扩张，保证仍指向同一曲
+            self.current = Some(if c == from {
+                to
+            } else {
+                let shrunk = if c > from { c - 1 } else { c };
+                if shrunk >= to { shrunk + 1 } else { shrunk }
+            });
+        }
+        Ok(())
+    }
+
     /// 删除下标 index 的曲。返回 true 若当前曲被删（调用方负责停止播放）。
     pub fn remove(&mut self, index: usize) -> bool {
         if index >= self.items.len() {
@@ -119,4 +145,69 @@ pub fn next_rand(state: &mut u64) -> u64 {
     *state ^= *state >> 7;
     *state ^= *state << 17;
     *state
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn queue(n: usize, current: Option<usize>) -> Queue {
+        Queue {
+            items: (0..n)
+                .map(|i| QueueItem {
+                    path: format!("/{i}.flac").into(),
+                    title: format!("曲{i}"),
+                    artist: String::new(),
+                    album: String::new(),
+                    duration_ms: 0,
+                })
+                .collect(),
+            current,
+        }
+    }
+
+    fn titles(q: &Queue) -> Vec<String> {
+        q.items.iter().map(|i| i.title.clone()).collect()
+    }
+
+    #[test]
+    fn 移动_向后_当前曲跟随() {
+        let mut q = queue(4, Some(1));
+        q.move_item(1, 3).unwrap();
+        assert_eq!(titles(&q), ["曲0", "曲2", "曲3", "曲1"]);
+        assert_eq!(q.current, Some(3));
+    }
+
+    #[test]
+    fn 移动_向前_其他曲下标修正() {
+        let mut q = queue(4, Some(3));
+        q.move_item(1, 3).unwrap();
+        assert_eq!(titles(&q), ["曲0", "曲2", "曲3", "曲1"]);
+        assert_eq!(q.current, Some(2), "曲3 应从 3 移到 2");
+    }
+
+    #[test]
+    fn 移动_跨过当前曲_两侧都覆盖() {
+        // 当前曲在移动区间外（前面）
+        let mut q = queue(5, Some(0));
+        q.move_item(2, 4).unwrap();
+        assert_eq!(titles(&q), ["曲0", "曲1", "曲3", "曲4", "曲2"]);
+        assert_eq!(q.current, Some(0));
+
+        // 当前曲在移动区间内（被顺延）
+        let mut q = queue(5, Some(3));
+        q.move_item(0, 4).unwrap();
+        assert_eq!(titles(&q), ["曲1", "曲2", "曲3", "曲4", "曲0"]);
+        assert_eq!(q.current, Some(2), "曲3 应从 3 移到 2");
+    }
+
+    #[test]
+    fn 移动_同位与越界() {
+        let mut q = queue(3, Some(1));
+        q.move_item(1, 1).unwrap();
+        assert_eq!(q.current, Some(1));
+        assert!(q.move_item(0, 3).is_err());
+        assert!(q.move_item(3, 0).is_err());
+        assert_eq!(titles(&q), ["曲0", "曲1", "曲2"], "失败的移动不改队列");
+    }
 }

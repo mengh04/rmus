@@ -95,6 +95,8 @@ pub enum Request {
     Remove { index: Option<usize> },
     /// 打乱队列（当前曲移到队首）
     Shuffle,
+    /// 调整队列顺序：把第 from 曲移到第 to 的位置（0 起，其余曲顺延）
+    Move { from: usize, to: usize },
     QueueList,
     /// 列出命名队列
     PlaylistsList,
@@ -108,6 +110,8 @@ pub enum Request {
     PlaylistAdd { name: String, paths: Vec<PathBuf> },
     /// 删除命名队列（正在播放的队列不可删）
     PlaylistRemove { name: String },
+    /// 重命名命名队列（正在播放时跟随改名；to 已存在则报错）
+    PlaylistRename { from: String, to: String },
     /// 循环模式：不设则循环切换 off -> all -> one -> off
     SetRepeat { mode: Option<RepeatMode> },
     /// 随机播放开关
@@ -117,6 +121,8 @@ pub enum Request {
     /// 库模糊播放：最佳匹配插到当前曲后立即播（空队列则直接播）。
     /// daemon 层匹配后转为引擎的 PlayNow。
     PlayMatch { query: String },
+    /// 列出整个音乐库（daemon 层查索引，不进引擎）
+    LibList,
     /// 全量重建库索引（~/Music；daemon 层扫描）
     LibRescan,
     /// 请求 daemon 退出（daemon 层处理，不进引擎）
@@ -167,4 +173,40 @@ pub enum ServerMsg {
     Reply { id: u64, result: Reply },
     Error { id: u64, error: String },
     Event(Event),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// daemon 与客户端可能不同版本：事件序列化必须能被对面解析。
+    #[test]
+    fn 事件_序列化可解析() {
+        let events = [
+            Event::QueueChanged,
+            Event::Position { position_ms: 1234 },
+            Event::SongChanged { index: Some(3) },
+            Event::StateChanged { state: PlayState::Playing },
+            Event::VolumeChanged { value: 0.5 },
+            Event::ModeChanged { repeat: RepeatMode::All, random: true },
+        ];
+        for ev in events {
+            let text = serde_json::to_string(&ev).expect("序列化");
+            let back: Event = serde_json::from_str(&text)
+                .unwrap_or_else(|e| panic!("解析失败: {e} <- {text}"));
+            assert_eq!(serde_json::to_string(&back).unwrap(), text);
+        }
+    }
+
+    /// 新请求的序列化抽查（snake_case 方法名是对外契约）。
+    #[test]
+    fn 请求_方法名() {
+        fn method(req: &Request) -> String {
+            let msg = serde_json::to_value(RequestMsg { id: 1, request: req.clone() }).unwrap();
+            msg.get("method").and_then(|m| m.as_str()).unwrap().into()
+        }
+        assert_eq!(method(&Request::Move { from: 0, to: 1 }), "move");
+        assert_eq!(method(&Request::PlaylistRename { from: "a".into(), to: "b".into() }), "playlist_rename");
+        assert_eq!(method(&Request::LibList), "lib_list");
+    }
 }

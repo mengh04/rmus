@@ -37,6 +37,13 @@ pub enum Action {
     RemoveSelected,
     /// 删除正在播放的曲目
     RemoveCurrent,
+    /// 队列内把选中曲上移 / 下移一位
+    MoveUp,
+    MoveDown,
+    /// 把选中曲目加到队列尾部（音乐库视图；不打断播放）
+    AddSelected,
+    /// 重命名：当前队列（队列视图）或选中的播放列表
+    RenameSelected,
     /// 清空队列
     ClearQueue,
     /// 打乱队列
@@ -76,6 +83,8 @@ pub fn resolve(key: KeyEvent) -> Option<Action> {
             'C' => Some(ClearQueue),
             'S' => Some(Shuffle),
             'R' => Some(Rescan),
+            'J' => Some(MoveDown),
+            'K' => Some(MoveUp),
             _ => None,
         },
         // 不带修饰键的普通键
@@ -93,6 +102,8 @@ pub fn resolve(key: KeyEvent) -> Option<Action> {
             's' => Some(Stop),
             'd' => Some(RemoveSelected),
             'x' => Some(RemoveCurrent),
+            'a' => Some(AddSelected),
+            'c' => Some(RenameSelected),
             'r' => Some(CycleRepeat),
             'z' => Some(ToggleRandom),
             '+' | '=' => Some(VolumeUp),
@@ -132,6 +143,9 @@ pub const HELP: &[(&str, &str)] = &[
     ("n / p", "下一曲 / 上一曲"),
     ("s", "停止"),
     ("d / D / x", "删除：选中曲 / 正在播放的曲"),
+    ("J / K", "队列内上移 / 下移选中曲"),
+    ("a", "把选中曲加入队列（音乐库 / 搜索里 Tab 同效）"),
+    ("c", "重命名：当前队列 / 选中的播放列表"),
     ("C", "清空队列"),
     ("S", "打乱队列"),
     ("r", "循环模式 关→列表→单曲"),
@@ -142,7 +156,7 @@ pub const HELP: &[(&str, &str)] = &[
     ("w", "当前队列存为播放列表"),
     ("B", "结束试听，恢复原队列"),
     ("R", "重建库索引"),
-    ("Tab / 数字", "切换 队列/播放列表"),
+    ("Tab / 数字", "切换 队列/音乐库/播放列表"),
     ("Esc", "关闭浮层"),
     ("? / q", "帮助 / 退出"),
 ];

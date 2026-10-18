@@ -44,11 +44,22 @@ Run `rmus` with no subcommand to open the interactive player:
 - Top bar: view tabs with counts, current queue name, playback state, repeat / shuffle / volume
 - Queue: one row per track — number, title, artist, album, duration — with the playing track marked
   by an accent bar and the selection by a raised row; long titles truncate with an ellipsis
+- Library: everything indexed from `~/Music`; `Enter` jump-plays a track, `a` appends it to the
+  queue without interrupting playback
 - Playlists: the active playlist carries a `当前` badge
 - Bottom: now-playing title line plus a full-width progress bar (elapsed / total)
 - `/` fuzzy library search, `:` command palette, `?` scrollable help sheet, `w` save the queue
 - The layout collapses gracefully as the window narrows: album column, then artist column, then
   the secondary status readouts drop out; the terminal title follows the current track
+
+### Editing the queue
+
+- `J` / `K` move the selected track down / up inside the queue; the cursor follows the track
+- `d` removes the selected track, `D` / `x` remove the playing one, `C` clears, `S` shuffles
+- `c` renames the current queue (an anonymous queue gets its first name; a named one keeps its
+  history under the new name)
+- In the search overlay, `Enter` jump-plays and `Tab` appends to the queue without playing
+- In the playlists view, `c` renames and `d` deletes the selected playlist
 
 While an overlay is open the terminal cursor moves into its input line; everywhere else it is hidden.
 

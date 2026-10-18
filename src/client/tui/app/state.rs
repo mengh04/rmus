@@ -7,15 +7,17 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Queue,
+    Library,
     Playlists,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 2] = [Tab::Queue, Tab::Playlists];
+    pub const ALL: [Tab; 3] = [Tab::Queue, Tab::Library, Tab::Playlists];
 
     pub fn title(self) -> &'static str {
         match self {
             Tab::Queue => "队列",
+            Tab::Library => "音乐库",
             Tab::Playlists => "播放列表",
         }
     }
@@ -33,21 +35,24 @@ impl Tab {
 }
 
 /// 输入模式的用途（vim 命令行：`:w` 存播放列表）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputPurpose {
     SavePlaylist,
+    /// 重命名播放列表（携带旧名，确认时发 PlaylistRename）
+    RenamePlaylist(String),
 }
 
 impl InputPurpose {
     /// 底部命令行显示的前缀。
-    pub fn prefix(self) -> &'static str {
+    pub fn prefix(&self) -> &'static str {
         match self {
             InputPurpose::SavePlaylist => ":w ",
+            InputPurpose::RenamePlaylist(_) => ":rename ",
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
     Normal,
     /// Telescope 式搜索面板：输入与实时结果一体（`search::handle_key` 处理）

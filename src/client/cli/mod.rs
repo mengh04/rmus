@@ -156,6 +156,13 @@ pub(crate) fn run(mut cli: Cli) -> Result<()> {
             client.request(Request::Shuffle)?;
             println!("队列已打乱");
         }
+        Command::Move { from, to } => {
+            client.request(Request::Move {
+                from: *from,
+                to: *to,
+            })?;
+            println!("已把第 {from} 首移到第 {to}");
+        }
         Command::Repeat { mode } => {
             let value = client.request(Request::SetRepeat {
                 mode: mode.as_deref().map(parse_repeat).transpose()?,

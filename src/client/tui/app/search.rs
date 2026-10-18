@@ -33,6 +33,8 @@ impl App {
             /// query 变了，重新过滤
             Edit,
             Play(std::path::PathBuf),
+            /// 把选中结果加到队尾（不播）
+            Enqueue(std::path::PathBuf),
         }
         let intent = match (key.modifiers, key.code) {
             (KM::CONTROL, KeyCode::Char('c')) | (_, KeyCode::Esc) => Intent::Close,
@@ -41,6 +43,12 @@ impl App {
                 .as_ref()
                 .and_then(|s| s.results.get(s.selected))
                 .map_or(Intent::Keep, |t| Intent::Play(t.path.clone())),
+            // Tab：入队不播——"还想再听几首再轮到它"的加法
+            (_, KeyCode::Tab) => self
+                .search
+                .as_ref()
+                .and_then(|s| s.results.get(s.selected))
+                .map_or(Intent::Keep, |t| Intent::Enqueue(t.path.clone())),
             // vim/telescope 习惯：C-j/C-k/C-n/C-p 或方向键移动
             (KM::CONTROL, KeyCode::Char('j' | 'n')) | (KeyModifiers::NONE, KeyCode::Down) => {
                 Intent::Select(1)
@@ -80,6 +88,15 @@ impl App {
             }
             Intent::Edit => self.run_search(),
             Intent::Play(path) => self.play_library_track(&path),
+            Intent::Enqueue(path) => {
+                let title = self
+                    .search
+                    .as_ref()
+                    .and_then(|s| s.results.iter().find(|t| t.path == path))
+                    .map(|t| t.title.clone())
+                    .unwrap_or_default();
+                self.enqueue_path(&path, &title);
+            }
         }
     }
 
@@ -110,7 +127,7 @@ impl App {
 
     /// 播放库里的一首：加到队尾并跳过去播。
     /// （协议没有"按路径直接插播"，用 Add + Play(index) 组合实现）
-    fn play_library_track(&mut self, path: &Path) {
+    pub(super) fn play_library_track(&mut self, path: &Path) {
         let Ok(value) = self.daemon.request(Request::Status) else {
             return;
         };
@@ -118,20 +135,33 @@ impl App {
             return;
         };
         let index = status.queue_len; // Add 后新曲目落在队尾
-        if let Err(e) = self.daemon.request(Request::Add {
-            paths: vec![path.to_path_buf()],
-        }) {
-            self.notify(format!("{e}"), true);
+        let title = path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        if !self.enqueue_path(path, &title) {
             return;
         }
         self.simple(Request::Play { index: Some(index) });
         self.need_queue = true;
-        self.notify(
-            format!(
-                "插播 {}",
-                path.file_name().unwrap_or_default().to_string_lossy()
-            ),
-            false,
-        );
+        self.notify(format!("插播 {title}"), false);
+    }
+
+    /// 把一首曲加到队列尾部（不播）。成功返回 true。
+    /// `selection::add_selected_to_queue` 与搜索面板的 Tab 入队共用。
+    pub(super) fn enqueue_path(&mut self, path: &Path, title: &str) -> bool {
+        match self.daemon.request(Request::Add {
+            paths: vec![path.to_path_buf()],
+        }) {
+            Ok(_) => {
+                self.notify(format!("已加入队列：{title}"), false);
+                true
+            }
+            Err(e) => {
+                self.notify(format!("{e}"), true);
+                false
+            }
+        }
     }
 }

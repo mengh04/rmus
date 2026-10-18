@@ -13,7 +13,7 @@ pub fn draw(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         return;
     }
 
-    if let Mode::Input(purpose) = app.mode {
+    if let Mode::Input(purpose) = &app.mode {
         let prefix = purpose.prefix().trim_end();
         let (cx, cy) = input_line(frame, theme, area, prefix, app.input_buffer());
         frame.set_cursor_position((cx, cy));
@@ -58,14 +58,25 @@ fn keys_for(tab: Tab) -> &'static [(&'static str, &'static str)] {
         Tab::Queue => &[
             ("j/k", "移动"),
             ("Enter", "播放"),
+            ("J/K", "调序"),
             ("/", "搜索"),
             (":", "命令"),
             ("?", "帮助"),
             ("q", "退出"),
         ],
+        Tab::Library => &[
+            ("j/k", "移动"),
+            ("Enter", "插播"),
+            ("a", "入队"),
+            ("/", "搜索"),
+            (":", "命令"),
+            ("?", "帮助"),
+        ],
         Tab::Playlists => &[
             ("j/k", "移动"),
             ("Enter", "播放"),
+            ("c", "改名"),
+            ("d", "删除"),
             ("w", "存队列"),
             (":", "命令"),
             ("?", "帮助"),
@@ -73,15 +84,18 @@ fn keys_for(tab: Tab) -> &'static [(&'static str, &'static str)] {
     }
 }
 
-/// 右下角统计：队列报曲目数和总时长，播放列表报个数。
+/// 右下角统计：队列/音乐库报曲目数和总时长，播放列表报个数。
 fn stats_line(app: &App) -> String {
     match app.tab {
-        Tab::Queue => {
-            let count = app.queue.len();
+        Tab::Queue | Tab::Library => {
+            let (count, tracks) = match app.tab {
+                Tab::Library => (app.library.len(), &app.library),
+                _ => (app.queue.len(), &app.queue),
+            };
             if count == 0 {
                 return String::new();
             }
-            let total: u64 = app.queue.iter().map(|t| t.duration_ms).sum();
+            let total: u64 = tracks.iter().map(|t| t.duration_ms).sum();
             format!("共 {count} 首 · {}", fmt_mmss(total))
         }
         Tab::Playlists => {

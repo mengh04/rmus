@@ -125,6 +125,17 @@ impl Engine {
                 self.emit(Event::QueueChanged);
                 Ok(Reply::Status(Box::new(self.status())))
             }
+            Request::Move { from, to } => {
+                self.queue.move_item(from, to)?;
+                if let Some(name) = self.queue_name.clone()
+                    && let Some(items) = self.named.get_mut(&name)
+                {
+                    *items = self.queue.items.clone();
+                }
+                self.dirty = true;
+                self.emit(Event::QueueChanged);
+                Ok(Reply::Ok)
+            }
             Request::PlaylistsList => {
                 let names = self.named.keys().cloned().collect();
                 Ok(Reply::Playlists {
@@ -175,6 +186,25 @@ impl Engine {
                 self.dirty = true;
                 Ok(Reply::Ok)
             }
+            Request::PlaylistRename { from, to } => {
+                if from == to {
+                    return Ok(Reply::Ok);
+                }
+                if !self.named.contains_key(&from) {
+                    return Err(format!("队列 {from} 不存在"));
+                }
+                if self.named.contains_key(&to) {
+                    return Err(format!("队列 {to} 已存在"));
+                }
+                let items = self.named.remove(&from).unwrap_or_default();
+                self.named.insert(to.clone(), items);
+                // 正在播的就是这张：顶栏显示的名字跟随
+                if self.queue_name.as_deref() == Some(from.as_str()) {
+                    self.queue_name = Some(to);
+                }
+                self.dirty = true;
+                Ok(Reply::Ok)
+            }
             Request::SetRepeat { mode } => {
                 self.repeat = mode.unwrap_or(match self.repeat {
                     RepeatMode::Off => RepeatMode::All,
@@ -211,8 +241,9 @@ impl Engine {
             Request::PlaylistAdd { .. } => Err("内部错误：PlaylistAdd 未在 daemon 层处理".into()),
             // Quit 由 daemon 层处理，不应到达这里
             Request::Quit => Err("内部错误：Quit 未在 daemon 层处理".into()),
-            // Find/PlayMatch/LibRescan 由 daemon 层处理（查库/扫描），不应到达这里
-            Request::Find { .. } | Request::PlayMatch { .. } | Request::LibRescan => {
+            // Find/PlayMatch/LibList/LibRescan 由 daemon 层处理（查库/扫描），不应到达这里
+            Request::Find { .. } | Request::PlayMatch { .. } | Request::LibList
+            | Request::LibRescan => {
                 Err("内部错误：库请求未在 daemon 层处理".into())
             }
         }
