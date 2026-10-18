@@ -112,6 +112,12 @@ pub struct OnlineSong {
     pub song_id: String,
     #[serde(default)]
     pub duration_ms: u64,
+    /// 下载前已知的格式标注："flac" / "320k" / ...；源给不出为 None
+    #[serde(default)]
+    pub format: Option<String>,
+    /// 该格式的体积估计（字节）
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
 }
 
 /// 已发现插件的信息（`plugin list`）。methods 形状即协议的

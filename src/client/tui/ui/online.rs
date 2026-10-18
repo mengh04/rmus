@@ -134,9 +134,16 @@ fn draw_head(
         put(cols.artist_x, cols.artist_w, "艺术家", Alignment::Left);
     }
     if cols.album_w > 0 {
-        put(cols.album_x, cols.album_w.saturating_sub(10), "专辑", Alignment::Left);
+        // 右侧要给 音质+来源 两列让位（各 ~10/8 列），专辑文字相应收缩
+        let album_w = cols.album_w.saturating_sub(21);
+        put(cols.album_x, album_w, "专辑", Alignment::Left);
         let src_w = 8;
         let src_x = cols.dur_x.saturating_sub(src_w + 2);
+        let q_w = 10;
+        let q_x = src_x.saturating_sub(q_w + 2);
+        if q_x > cols.album_x {
+            put(q_x, q_w, "音质", Alignment::Right);
+        }
         if src_x > cols.album_x {
             put(src_x, src_w, "来源", Alignment::Right);
         }
@@ -203,8 +210,8 @@ fn draw_row(
         );
     }
     if cols.album_w > 0 {
-        // 右侧要给来源标签留位置：专辑文字宽度让出 10 列
-        let album_w = cols.album_w.saturating_sub(10);
+        // 右侧要给 音质+来源 两列让位（共 ~21 列），专辑文字相应收缩
+        let album_w = cols.album_w.saturating_sub(21);
         put(
             cols.album_x,
             album_w,
@@ -247,10 +254,29 @@ fn draw_row(
     };
     put(cols.dur_x, cols.dur_w, Span::styled(right, style), Alignment::Right);
 
-    // 来源标签挤在时长左边；专辑文字相应让位，避免重叠
+    // 音质 + 来源标签挤在时长左边；专辑文字相应让位，避免重叠。
+    // 窄终端先丢音质、再丢来源。
     if cols.album_w > 0 {
         let src_w = 8;
         let src_x = cols.dur_x.saturating_sub(src_w + 2);
+        let quality = quality_label(song);
+        let q_w = 10;
+        let q_x = src_x.saturating_sub(q_w + 2);
+        if q_x > cols.album_x {
+            put(
+                q_x,
+                q_w,
+                Span::styled(
+                    fit(&quality, q_w),
+                    if song.format.as_deref() == Some("flac") {
+                        Style::new().fg(theme.ok)
+                    } else {
+                        theme.style_faint()
+                    },
+                ),
+                Alignment::Right,
+            );
+        }
         if src_x > cols.album_x {
             put(
                 src_x,
@@ -262,6 +288,16 @@ fn draw_row(
                 Alignment::Right,
             );
         }
+    }
+}
+
+/// 音质标签："flac 53M" / "320k 10M" / "—"（源给不出品质信息）。
+fn quality_label(song: &super::super::app::OnlineSong) -> String {
+    let megabytes = |bytes: u64| (bytes + 512 * 1024) / (1024 * 1024);
+    match (&song.format, song.size_bytes) {
+        (Some(format), Some(bytes)) => format!("{format} {}M", megabytes(bytes)),
+        (Some(format), None) => format.to_string(),
+        (None, _) => "—".to_string(),
     }
 }
 

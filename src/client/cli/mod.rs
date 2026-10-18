@@ -244,8 +244,16 @@ fn handle_dl(
             .filter(|ms| *ms > 0)
             .map(fmt_mmss)
             .unwrap_or_else(|| "--:--".into());
+        // 品质：格式 + 体积估计（下载前已知的那部分）
+        let format = song.get("format").and_then(|v| v.as_str());
+        let size = song.get("size_bytes").and_then(|v| v.as_u64());
+        let quality = match (format, size) {
+            (Some(f), Some(bytes)) => format!(" {f} {}M", (bytes + 512 * 1024) / (1024 * 1024)),
+            (Some(f), None) => format!(" {f}"),
+            (None, _) => String::new(),
+        };
         println!(
-            "{:>3}. [{source}] {title} - {artist}  {album}  {duration}",
+            "{:>3}. [{source}{quality}] {title} - {artist}  {album}  {duration}",
             i + 1
         );
     }

@@ -71,11 +71,17 @@ TUI 寻找第一个同时宣告 `search` + `download` 的插件，并按以下�
 请求  {"query": "晴天"}
 响应  {"songs": [{
   "title": "晴天", "artist": "周杰伦", "album": "叶惠美",
-  "source": "kuwo", "song_id": "228908", "duration_ms": 269000}]}
+  "source": "kuwo", "song_id": "228908", "duration_ms": 269000,
+  "format": "flac", "size_bytes": 55397039}]}
 ```
 
 字段除 `title/source/song_id` 外可省略；`song` 对象在下载时**原样回传**，
 所以插件应保证凭这几个字段能回源定位。
+
+`duration_ms` / `format`（"flac" / "320k" / ...）/ `size_bytes` 是
+**下载前就能告知用户的品质信息**：kuwo 来自搜索响应的 MINFO 字段，
+kugou 搜索期给不出（下载时查 songinfo 补齐）。客户端据此在列表里标注
+每首歌的品质，用户按 `d` 之前就知道拿到手的会是什么。
 
 ### download（task）
 
@@ -87,9 +93,14 @@ TUI 寻找第一个同时宣告 `search` + `download` 的插件，并按以下�
 
 - 产物写入 `RMUS_LIBRARY_DIR`，带完整 tag（rmus 的库监听会在文件稳定后
   自动重建索引，歌即入库）
-- 不要覆盖已存在的同名文件（回报 error）
-- 建议先写隐藏临时文件再原子改名，且扩展名不要是音频后缀，避免被
-  半成品扫描进库
+- 不要覆盖已存在的同名文件（回报 error）；建议先按 `title - artist`
+  预检，避免下完几十 MB 才发现重复
+- 先写隐藏临时文件再原子改名，扩展名不要是音频后缀，避免被半成品
+  扫描进库
+- **flac_only（默认开）**：`RMUS_DL_FLAC_ONLY=0` 或配置文件
+  `~/.config/rmus-dl/config.toml` 的 `flac_only = false` 可关闭。开启时
+  下载前用 Range 探针验证魔数，上游静默降级 mp3 会被直接拦下并回报
+  error（不产生任何已下载字节）
 
 ### cancel（call）
 
