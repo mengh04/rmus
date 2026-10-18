@@ -20,13 +20,20 @@ pub struct Cols {
 }
 
 /// 按可用宽度算列：曲名永远保留，艺术家/专辑逐级让位。
+/// 极窄时先砍时长（同名歌靠艺术家区分，时长反而不重要），再砍专辑；
+/// 艺术家尽量保到最后。
 pub fn columns(area: Rect) -> Cols {
     let right = area.right();
-    let dur_w = 7.min(area.width.saturating_sub(10)).max(4);
-    let dur_x = right.saturating_sub(dur_w);
     let index_x = area.x + 2;
     let index_w = 3;
     let title_x = index_x + index_w + 2;
+    // 宽度不够 40：时长整列让位（行绘制对 w==0 的列自动跳过）
+    let dur_w = if area.width >= 40 {
+        7.min(area.width.saturating_sub(10)).max(4)
+    } else {
+        0
+    };
+    let dur_x = right.saturating_sub(dur_w);
     let meta_end = dur_x.saturating_sub(2);
     let span = meta_end.saturating_sub(title_x);
 
@@ -38,8 +45,8 @@ pub fn columns(area: Rect) -> Cols {
             artist_w,
             album_w,
         )
-    } else if span >= 36 {
-        let artist_w = span * 38 / 100;
+    } else if span >= 12 {
+        let artist_w = (span * 40 / 100).max(6);
         (span.saturating_sub(artist_w + 2), artist_w, 0)
     } else {
         (span, 0, 0)

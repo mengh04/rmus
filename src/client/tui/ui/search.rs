@@ -134,7 +134,12 @@ fn draw_result_row(
 ) {
     let x = area.x + 2;
     let right = area.right().saturating_sub(2);
-    let dur_w = 7u16.min(area.width.saturating_sub(12)).max(4);
+    // 窄浮层时长让位：同名歌靠歌手区分，歌手列永远保留
+    let dur_w = if area.width >= 60 {
+        7u16.min(area.width.saturating_sub(12)).max(4)
+    } else {
+        0
+    };
     let dur_x = right.saturating_sub(dur_w);
     // 宽浮层里补上专辑列，定位同一首歌的不同版本更省事
     let album_w = if area.width >= 84 {
@@ -143,11 +148,7 @@ fn draw_result_row(
         0
     };
     let album_x = dur_x.saturating_sub(2 + album_w);
-    let artist_w = if area.width >= 60 {
-        (area.width as u32 * 24 / 100) as u16
-    } else {
-        0
-    };
+    let artist_w = (area.width as u32 * 24 / 100).max(6) as u16;
     let artist_x = album_x.saturating_sub(2 + artist_w);
     let title_w = artist_x.saturating_sub(2 + x);
 
