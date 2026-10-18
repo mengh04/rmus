@@ -216,6 +216,10 @@ fn draw_row(
     // 时长列：下载中换成百分比，完成 ✓，失败 ✗
     let (right, style) = match download {
         Some(d) => match &d.status {
+            DownloadStatus::Running if d.received == 0 => {
+                // 直链解析中 / 首块未到：还没有可报告的字节
+                ("…".to_owned(), theme.style_accent())
+            }
             DownloadStatus::Running => {
                 let pct = match d.total {
                     Some(total) if total > 0 => {
