@@ -1,7 +1,9 @@
 //! 列表选中项：移动、播放选中、删除、队列内调序、首次定位。
 
+use super::state::parse_tracks;
 use super::{App, Tab};
 use crate::proto::Request;
+use std::path::Path;
 
 impl App {
     /// 当前活动列表的长度（仅 Normal 模式；搜索面板的选择自己管）。
@@ -129,6 +131,101 @@ impl App {
             // Add 成功后引擎会推 QueueChanged，这里只补状态里的队列长度
             self.need_status = true;
         }
+    }
+
+    /// `gd`（队列视图）：把选中的曲子在音乐库里定位（vim goto definition）。
+    /// 只在队列视图生效；曲子不在索引里（外部路径加进来的）则提示。
+    pub(super) fn locate_selected_in_library(&mut self) {
+        if self.tab != Tab::Queue {
+            return;
+        }
+        let Some(track) = self.queue.get(self.queue_selected) else {
+            return;
+        };
+        let path = track.path.clone();
+        if !self.reveal_in_library(&path) {
+            self.notify("这首曲子不在音乐库里", true);
+        }
+    }
+
+    /// 把音乐库视图切到 path 这首曲子上：现拉一次库列表拿到最新下标，
+    /// 光标停上去。找到返回 true（找不到不动视图）。
+    /// 搜索面板的 gf 与队列的 gd 共用。
+    pub(super) fn reveal_in_library(&mut self, path: &Path) -> bool {
+        if let Ok(value) = self.daemon.request(Request::LibList) {
+            self.library = parse_tracks(&value);
+            self.clamp_selections();
+        }
+        let Some(index) = self.library.iter().position(|t| t.path == path) else {
+            return false;
+        };
+        self.library_selected = index;
+        self.tab = Tab::Library;
+        true
+    }
+
+    /// 队列范围删除（dj / dk / dG / dgg），删 [start, end)。
+    /// 光标停在删除点；引擎侧整段记一次撤销快照，一次 u 就能全回滚。
+    pub(super) fn delete_queue_range(&mut self, start: usize, end: usize) {
+        if self.tab != Tab::Queue || self.queue.is_empty() {
+            return;
+        }
+        let len = self.queue.len();
+        let start = start.min(len - 1);
+        let end = end.min(len).max(start + 1);
+        self.simple(Request::RemoveRange { start, end });
+        self.need_queue = true;
+        // 光标停在删除点（列表刷新后 clamp_selections 兜底）
+        self.queue_selected = start;
+    }
+
+    /// yy：把选中曲复制进未命名寄存器（队列 / 音乐库视图可用）。
+    pub(super) fn yank_selected(&mut self) {
+        let yanked = match self.tab {
+            Tab::Queue => self
+                .queue
+                .get(self.queue_selected)
+                .map(|t| (t.path.clone(), t.title.clone())),
+            Tab::Library => self
+                .library
+                .get(self.library_selected)
+                .map(|t| (t.path.clone(), t.title.clone())),
+            Tab::Playlists | Tab::Online => None,
+        };
+        match yanked {
+            Some((path, title)) => {
+                self.notify(format!("已复制 {title}（p 粘贴到队列）"), false);
+                self.register = Some((path, title));
+            }
+            None => self.notify("这里没有可复制的曲子", true),
+        }
+    }
+
+    /// p / P：把寄存器里的曲子插到队列光标后 / 前（队列空则直接加入）。
+    pub(super) fn put_from_register(&mut self, after: bool) {
+        let Some((path, title)) = self.register.clone() else {
+            self.notify("寄存器是空的，先用 yy 复制一首", true);
+            return;
+        };
+        // Add 落队尾（下标 = 当前长度），再 Move 到插入点；
+        // vim 语义：p 在光标后、P 在光标前
+        let len = self.queue.len();
+        let target = match (after, len) {
+            (_, 0) => len,
+            (true, _) => (self.queue_selected + 1).min(len),
+            (false, _) => self.queue_selected.min(len),
+        };
+        if !self.enqueue_path(&path, &title) {
+            return;
+        }
+        if target != len {
+            self.simple(Request::Move {
+                from: len,
+                to: target,
+            });
+        }
+        self.need_queue = true;
+        self.queue_selected = target;
     }
 
     pub(super) fn clamp_selections(&mut self) {

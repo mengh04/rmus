@@ -25,10 +25,11 @@ mod resample;
 mod run;
 mod store;
 mod track;
+mod undo;
 
 use crate::proto::{Event, PlayState, RepeatMode, Reply, Request, StatusInfo};
 use anyhow::Result;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
@@ -38,6 +39,7 @@ use tokio::sync::{broadcast, oneshot};
 use output::Output;
 use peek::PeekSnapshot;
 use queue::{Queue, QueueItem};
+use undo::Snapshot;
 
 /// position 事件推送节流间隔
 pub(super) const POSITION_EVENT_INTERVAL: Duration = Duration::from_millis(250);
@@ -119,6 +121,9 @@ pub struct Engine {
     last_position_event: Instant,
     /// 试听态存档；Some = 当前队列是临时的
     peek: Option<PeekSnapshot>,
+    /// 队列改动的撤销 / 重做栈（`undo::push_history` 在每次改动前压入）
+    undo: VecDeque<Snapshot>,
+    redo: VecDeque<Snapshot>,
 }
 
 impl Engine {
@@ -163,6 +168,8 @@ impl Engine {
             dirty: false,
             fatal_streak: 0,
             peek: None,
+            undo: VecDeque::new(),
+            redo: VecDeque::new(),
             last_position_event: Instant::now() - POSITION_EVENT_INTERVAL, // 首个事件立即发
         })
     }

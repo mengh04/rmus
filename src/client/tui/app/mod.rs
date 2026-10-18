@@ -83,6 +83,16 @@ pub struct App {
     history_cursor: Option<usize>,
     history_draft: String,
 
+    /// Normal 模式的 operator-pending 状态：按过 `g` / `d` / `y` 之后等
+    /// 第二个键。`g` 前缀：gg / gd / gt / gT；`d` 前缀：dd / dj / dk /
+    /// dG / dgg；`y` 前缀：yy。`d` 只在队列 / 播放列表视图开前缀
+    /// （在线视图 d 是下载）。
+    pending: Pending,
+    /// vim count：数字缓冲（3j、5gg、2dd 里的 3）。0 = 没在攒。
+    count: u32,
+    /// 未命名寄存器：yy 复制的曲子（路径 + 标题），p / P 粘贴进队列
+    register: Option<(std::path::PathBuf, String)>,
+
     pub help_open: bool,
     pub message: Option<Message>,
     pub should_quit: bool,
@@ -94,6 +104,21 @@ pub struct App {
     need_library: bool,
     need_playlists: bool,
     need_plugins: bool,
+}
+
+/// Normal 模式等待第二个键的状态（vim operator-pending）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Pending {
+    #[default]
+    None,
+    /// 按过 `g`：gg 跳顶 / gd 定位 / gt gT 切视图
+    G,
+    /// 按过 `d`：dd 删本行 / dj dk dG dgg 范围删
+    Delete,
+    /// `dg`：等第二个 g（dgg = 从顶部删到选中行）
+    DeleteG,
+    /// 按过 `y`：yy 复制选中曲到寄存器
+    Yank,
 }
 
 impl App {
@@ -131,6 +156,9 @@ impl App {
             cmd_history: Vec::new(),
             history_cursor: None,
             history_draft: String::new(),
+            pending: Pending::None,
+            count: 0,
+            register: None,
             help_open: false,
             message: None,
             should_quit: false,
@@ -168,18 +196,161 @@ impl App {
                 {
                     return;
                 }
-                // 数字键切 tab（1 起始），其余交给键位表
+                // vim count：数字进缓冲。单独的 0 = 跳顶（vim 的行首）。
                 if let (KeyModifiers::NONE, KeyCode::Char(c)) = (key.modifiers, key.code)
-                    && let Some(action) = keymap::resolve_digit(c, Tab::ALL.len())
+                    && let Some(d) = c.to_digit(10)
                 {
-                    self.execute(action);
+                    if d == 0 && self.count == 0 {
+                        self.execute(keymap::Action::Top);
+                    } else {
+                        self.count = self.count.saturating_mul(10).saturating_add(d).min(9_999);
+                    }
                     return;
                 }
-                if let Some(action) = keymap::resolve(key) {
-                    self.execute(action);
+                // operator-pending：gg gd gt gT / dd dj dk dG dgg / yy 的第二个键
+                if self.pending != Pending::None {
+                    self.apply_pending(key);
+                    return;
+                }
+                // count 消费键：3j、5G、2C-d、3J…
+                if self.count > 0 && self.execute_with_count(key) {
+                    return;
+                }
+                // `g` / `d` / `y` 是前缀键的起点（count 跟着带进 pending）。
+                // `d` 只在队列 / 播放列表视图开前缀：在线视图的 d 是下载。
+                if matches!((key.modifiers, key.code), (KeyModifiers::NONE, KeyCode::Char('g'))) {
+                    self.pending = Pending::G;
+                } else if matches!((key.modifiers, key.code), (KeyModifiers::NONE, KeyCode::Char('d')))
+                    && matches!(self.tab, Tab::Queue | Tab::Playlists)
+                {
+                    self.pending = Pending::Delete;
+                } else if matches!((key.modifiers, key.code), (KeyModifiers::NONE, KeyCode::Char('y'))) {
+                    self.pending = Pending::Yank;
+                } else {
+                    // 其余键不攒 count（vim 语义：无动作的 count 直接丢弃）
+                    self.count = 0;
+                    if let Some(action) = keymap::resolve(key) {
+                        self.execute(action);
+                    }
                 }
             }
         }
+    }
+
+    /// 消费 operator-pending 的第二个键。无效组合照 vim 一样吞掉
+    /// （取消前缀和 count，不执行别的动作）。
+    fn apply_pending(&mut self, key: crossterm::event::KeyEvent) {
+        use keymap::Action;
+        use KeyModifiers as KM;
+        let pending = std::mem::take(&mut self.pending);
+        let count = self.count; // 先读不清：dgg 这条路要带着 count 走
+        let n = count.max(1) as usize;
+        match (pending, key.modifiers, key.code) {
+            // gg 跳顶（[count]gg = 第 count 行）/ gd 去音乐库定位
+            (Pending::G, KM::NONE, KeyCode::Char('g')) => {
+                self.count = 0;
+                if count > 0 {
+                    self.set_selection(count as usize - 1);
+                } else {
+                    self.execute(Action::Top);
+                }
+            }
+            (Pending::G, KM::NONE, KeyCode::Char('d')) => {
+                self.count = 0;
+                self.execute(Action::LocateInLibrary);
+            }
+            // gt / gT 切视图（[count]gt = 第 count 个视图）
+            (Pending::G, KM::NONE, KeyCode::Char('t')) => {
+                self.count = 0;
+                if count >= 1 && count as usize <= Tab::ALL.len() {
+                    self.execute(Action::GotoTab(count as usize - 1));
+                } else {
+                    self.execute(Action::NextTab);
+                }
+            }
+            (Pending::G, KM::SHIFT, KeyCode::Char('T')) => {
+                self.count = 0;
+                for _ in 0..n {
+                    self.execute(Action::PrevTab);
+                }
+            }
+            // dd 删选中行（[count]dd = 连删 count 行）
+            (Pending::Delete, KM::NONE, KeyCode::Char('d')) => {
+                self.count = 0;
+                if count > 0 {
+                    let sel = self.queue_selected;
+                    self.delete_queue_range(sel, sel + count as usize);
+                } else {
+                    self.execute(Action::RemoveSelected);
+                }
+            }
+            // dj / dk / dG / dgg：队列范围删
+            (Pending::Delete, KM::NONE, KeyCode::Char('j')) => {
+                self.count = 0;
+                let sel = self.queue_selected;
+                self.delete_queue_range(sel, sel + n + 1);
+            }
+            (Pending::Delete, KM::NONE, KeyCode::Char('k')) => {
+                self.count = 0;
+                let sel = self.queue_selected;
+                self.delete_queue_range(sel.saturating_sub(n), sel + 1);
+            }
+            (Pending::Delete, KM::SHIFT, KeyCode::Char('G')) => {
+                self.count = 0;
+                let sel = self.queue_selected;
+                self.delete_queue_range(sel, usize::MAX);
+            }
+            // dgg 的第二个 g 还没来；count 跟着带过去
+            (Pending::Delete, KM::NONE, KeyCode::Char('g')) => self.pending = Pending::DeleteG,
+            (Pending::DeleteG, KM::NONE, KeyCode::Char('g')) => {
+                self.count = 0;
+                let sel = self.queue_selected;
+                let to = if count > 0 { count as usize } else { sel + 1 };
+                self.delete_queue_range(0, to);
+            }
+            // yy 复制选中曲
+            (Pending::Yank, KM::NONE, KeyCode::Char('y')) => {
+                self.count = 0;
+                self.yank_selected();
+            }
+            _ => self.count = 0,
+        }
+    }
+
+    /// count 消费键（在 handle_key 里 count > 0 时优先于键位表）。
+    /// 返回 false 表示该键不吃 count，交回普通派发。
+    fn execute_with_count(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        use KeyModifiers as KM;
+        let n = self.count;
+        let n_i = i32::try_from(n).unwrap_or(i32::MAX);
+        match (key.modifiers, key.code) {
+            (KM::NONE, KeyCode::Char('j')) | (KM::NONE, KeyCode::Down) => {
+                self.move_selection(n_i);
+            }
+            (KM::NONE, KeyCode::Char('k')) | (KM::NONE, KeyCode::Up) => {
+                self.move_selection(-n_i);
+            }
+            // [count]G = 第 count 行
+            (KM::SHIFT, KeyCode::Char('G')) | (KM::NONE, KeyCode::End) => {
+                self.set_selection(n as usize - 1);
+            }
+            (KM::CONTROL, KeyCode::Char('d')) => self.move_selection(n_i * 7),
+            (KM::CONTROL, KeyCode::Char('u')) => self.move_selection(-n_i * 7),
+            // 队列内移动 [count] 行
+            (KM::SHIFT, KeyCode::Char('J')) => {
+                for _ in 0..n {
+                    self.move_selected(1);
+                }
+            }
+            (KM::SHIFT, KeyCode::Char('K')) => {
+                for _ in 0..n {
+                    self.move_selected(-1);
+                }
+            }
+            _ => return false,
+        }
+        self.count = 0;
+        true
     }
 
     /// 取走 daemon 推送并转化成刷新标记；顺带收取后台请求的回执。

@@ -24,6 +24,9 @@ impl Engine {
                     let _ = reply.send(result);
                 }
                 Ok(ToEngine::AddScanned { items, reply, .. }) => {
+                    if !items.is_empty() {
+                        self.push_history();
+                    }
                     let added = items.len();
                     self.queue.items.extend(items);
                     self.dirty = true;
@@ -62,6 +65,10 @@ impl Engine {
                     name, items, reply, ..
                 }) => {
                     let added = items.len();
+                    // 加的就是当前队列才可撤销（改别的命名队列不在撤销范围）
+                    if self.queue_name.as_deref() == Some(name.as_str()) && !items.is_empty() {
+                        self.push_history();
+                    }
                     self.named.entry(name.clone()).or_default().extend(items);
                     if self.queue_name.as_deref() == Some(name.as_str()) {
                         // 命名队列就是当前队列：同步追加，播放体验连续

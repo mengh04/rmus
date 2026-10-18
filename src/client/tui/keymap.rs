@@ -26,6 +26,9 @@ pub enum Action {
     Bottom,
     HalfUp,
     HalfDown,
+    /// 队列选中曲在音乐库里定位（`gd`，goto definition）。
+    /// 由 App 的 `g` 前缀拦截，不经 `resolve` 单键派发。
+    LocateInLibrary,
     /// Enter：播放选中项（队列曲目 / 播放列表 / 搜索结果）
     PlaySelected,
     /// 播放/暂停切换
@@ -54,6 +57,14 @@ pub enum Action {
     CycleRepeat,
     /// 相对跳转（毫秒，负数快退）
     Seek(i64),
+    /// 撤销上一次队列改动
+    Undo,
+    /// 重做被撤销的队列改动
+    Redo,
+    /// 把 yank 寄存器里的曲子插到队列光标后（vim p）
+    PutAfter,
+    /// 插到队列光标前（vim P）
+    PutBefore,
     /// 随机播放开关
     ToggleRandom,
     VolumeUp,
@@ -74,12 +85,17 @@ pub enum Action {
 pub const SEEK_STEP_MS: i64 = 10_000;
 
 /// 按键 -> 动作。返回 None 表示该键未绑定（忽略）。
+///
+/// 前缀键 `g` / `d` / `y`（gg gd gt gT / dd dj dk dG dgg / yy）由
+/// `App::handle_key` 的 operator-pending 状态机拦截，这里收不到；
+/// 数字键也不经过这里——它们是 vim count，同样在 App 里缓冲。
 pub fn resolve(key: KeyEvent) -> Option<Action> {
     use Action::*;
     match (key.modifiers, key.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => Some(Quit),
         (KeyModifiers::CONTROL, KeyCode::Char('d')) => Some(HalfDown),
         (KeyModifiers::CONTROL, KeyCode::Char('u')) => Some(HalfUp),
+        (KeyModifiers::CONTROL, KeyCode::Char('r')) => Some(Redo),
         (KeyModifiers::SHIFT, KeyCode::Char(c)) => match c {
             // 大写字母键（SHIFT+char），vim 风格的"重动作"
             'G' => Some(Bottom),
@@ -90,6 +106,10 @@ pub fn resolve(key: KeyEvent) -> Option<Action> {
             'R' => Some(Rescan),
             'J' => Some(MoveDown),
             'K' => Some(MoveUp),
+            // vim N：上一个匹配 ≈ 上一曲
+            'N' => Some(Prev),
+            // vim P：put 到队列光标前
+            'P' => Some(PutBefore),
             _ => None,
         },
         // 不带修饰键的普通键
@@ -98,13 +118,12 @@ pub fn resolve(key: KeyEvent) -> Option<Action> {
             '?' => Some(Help),
             'j' => Some(Down),
             'k' => Some(Up),
-            'g' => Some(Top),
             'h' => Some(PrevTab),
             'l' => Some(NextTab),
             ' ' => Some(PlayToggle),
             'n' => Some(Next),
-            'p' => Some(Prev),
             's' => Some(Stop),
+            // 队列 / 播放列表视图里 `d` 由 App 拦成前缀键（dd），到不了这
             'd' => Some(RemoveSelected),
             'x' => Some(RemoveCurrent),
             'a' => Some(AddSelected),
@@ -115,6 +134,9 @@ pub fn resolve(key: KeyEvent) -> Option<Action> {
             '-' => Some(VolumeDown),
             '[' => Some(Seek(-SEEK_STEP_MS)),
             ']' => Some(Seek(SEEK_STEP_MS)),
+            'u' => Some(Undo),
+            // vim p：put 到队列光标后
+            'p' => Some(PutAfter),
             '/' => Some(Search),
             ':' => Some(Command),
             'w' => Some(SavePlaylist),
@@ -134,28 +156,29 @@ pub fn resolve(key: KeyEvent) -> Option<Action> {
     }
 }
 
-/// 数字键 1..=9 -> tab 下标；单独拆出来避免和普通字符键混在一起。
-pub fn resolve_digit(c: char, tab_count: usize) -> Option<Action> {
-    let n = c.to_digit(10)? as usize;
-    (n >= 1 && n <= tab_count).then_some(Action::GotoTab(n - 1))
-}
-
 /// 帮助浮层内容：(按键, 说明)。新加键位记得同步这里。
 pub const HELP: &[(&str, &str)] = &[
-    ("j / k / ↑↓", "上下移动"),
-    ("g / G", "跳到顶部 / 底部"),
+    ("j / k / ↑↓", "上下移动（数字=count，如 3j）"),
+    ("gg / G", "跳到顶部 / 底部（5gg = 第 5 行）"),
+    ("0", "跳到顶部"),
+    ("gd", "队列选中曲在音乐库定位"),
     ("C-d / C-u", "向下 / 向上翻半页"),
     ("Enter", "播放选中项"),
     ("空格", "播放 / 暂停"),
-    ("n / p", "下一曲 / 上一曲"),
+    ("n / N", "下一曲 / 上一曲"),
     ("s", "停止"),
-    ("d / D / x", "删除：选中曲 / 正在播放的曲"),
+    ("dd", "删除选中曲（队列 / 播放列表）"),
+    ("dj / dk / dG / dgg", "队列范围删：向下 / 向上 / 到底 / 到顶"),
+    ("D / x", "删除正在播放的曲"),
     ("d / Enter / x", "在线视图：下载 / 下载并试听 / 取消下载"),
+    ("yy", "复制选中曲到寄存器（队列 / 音乐库）"),
+    ("p / P", "粘贴到队列光标后 / 前"),
     ("J / K", "队列内上移 / 下移选中曲"),
     ("a", "把选中曲加入队列（音乐库 / 搜索里 Tab 同效）"),
     ("c", "重命名：当前队列 / 选中的播放列表"),
     ("C", "清空队列"),
     ("S", "打乱队列"),
+    ("u / C-r", "撤销 / 重做队列改动"),
     ("r", "循环模式 关→列表→单曲"),
     ("z", "随机播放开关"),
     ("+ / -", "音量加减"),
@@ -167,7 +190,44 @@ pub const HELP: &[(&str, &str)] = &[
     ("w", "当前队列存为播放列表"),
     ("B", "结束试听，恢复原队列"),
     ("R", "重建库索引"),
-    ("Tab / 数字", "切换 队列/音乐库/播放列表/在线"),
+    ("gt / gT / Tab", "切换视图（2gt = 第 2 个）"),
     ("Esc", "关闭浮层"),
     ("? / q", "帮助 / 退出"),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plain(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn 方括号是快退快进() {
+        assert_eq!(resolve(plain('[')), Some(Action::Seek(-SEEK_STEP_MS)));
+        assert_eq!(resolve(plain(']')), Some(Action::Seek(SEEK_STEP_MS)));
+    }
+
+    #[test]
+    fn 撤销重做与粘贴() {
+        assert_eq!(resolve(plain('u')), Some(Action::Undo));
+        let ctrl_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
+        assert_eq!(resolve(ctrl_r), Some(Action::Redo));
+        assert_eq!(resolve(plain('p')), Some(Action::PutAfter));
+        let shift_p = KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT);
+        assert_eq!(resolve(shift_p), Some(Action::PutBefore));
+    }
+
+    #[test]
+    fn 大写n是上一曲_p不再是() {
+        let shift_n = KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT);
+        assert_eq!(resolve(shift_n), Some(Action::Prev));
+        assert_eq!(resolve(plain('p')), Some(Action::PutAfter));
+    }
+
+    #[test]
+    fn g_不再是单键跳顶_交给gg前缀() {
+        assert_eq!(resolve(plain('g')), None);
+    }
+}

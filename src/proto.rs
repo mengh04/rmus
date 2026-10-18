@@ -93,6 +93,12 @@ pub enum Request {
     Clear,
     /// 删除队列中的第 index 曲；None = 删除正在播放的曲子（自动续播下一首）
     Remove { index: Option<usize> },
+    /// 删除队列中 [start, end) 范围的曲子（dd / dj / dk / dG / dgg）
+    RemoveRange { start: usize, end: usize },
+    /// 撤销上一次队列改动（增删 / 排序 / 清空 / 打乱）
+    Undo,
+    /// 重做被撤销的队列改动
+    Redo,
     /// 打乱队列（当前曲移到队首）
     Shuffle,
     /// 调整队列顺序：把第 from 曲移到第 to 的位置（0 起，其余曲顺延）
@@ -233,6 +239,9 @@ mod tests {
             msg.get("method").and_then(|m| m.as_str()).unwrap().into()
         }
         assert_eq!(method(&Request::Move { from: 0, to: 1 }), "move");
+        assert_eq!(method(&Request::RemoveRange { start: 0, end: 2 }), "remove_range");
+        assert_eq!(method(&Request::Undo), "undo");
+        assert_eq!(method(&Request::Redo), "redo");
         assert_eq!(method(&Request::PlaylistRename { from: "a".into(), to: "b".into() }), "playlist_rename");
         assert_eq!(method(&Request::LibList), "lib_list");
         assert_eq!(method(&Request::PluginList), "plugin_list");

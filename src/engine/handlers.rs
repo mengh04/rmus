@@ -63,6 +63,9 @@ impl Engine {
                 Ok(Reply::Ok)
             }
             Request::Clear => {
+                if !self.queue.is_empty() {
+                    self.push_history();
+                }
                 self.kill_decoder();
                 self.queue.clear();
                 // 当前是命名队列时同步清空它
@@ -90,6 +93,7 @@ impl Engine {
                 if index >= self.queue.len() {
                     return Err(format!("下标 {index} 超出队列范围"));
                 }
+                self.push_history();
                 let removed_current = self.queue.remove(index);
                 if let Some(name) = self.queue_name.clone()
                     && let Some(items) = self.named.get_mut(&name)
@@ -114,7 +118,42 @@ impl Engine {
                 }
                 Ok(Reply::Ok)
             }
+            // dd / dj / dk / dG / dgg 的整段删除：一次请求记一次撤销
+            Request::RemoveRange { start, end } => {
+                let len = self.queue.len();
+                if start >= end || end > len {
+                    return Err(format!("范围 {start}..{end} 超出队列（0..{len}）"));
+                }
+                self.push_history();
+                let removed_current =
+                    self.queue.current.is_some_and(|c| c >= start && c < end);
+                // 从高下标往低删，前面的下标不失效
+                for i in (start..end).rev() {
+                    self.queue.remove(i);
+                }
+                if let Some(name) = self.queue_name.clone()
+                    && let Some(items) = self.named.get_mut(&name)
+                {
+                    items.drain(start..end);
+                }
+                self.dirty = true;
+                self.emit(Event::QueueChanged);
+                if removed_current {
+                    if self.queue.items.is_empty() {
+                        self.finish_or_restore();
+                    } else if self.state == PlayState::Stopped {
+                        self.queue.current = Some(start.min(self.queue.items.len() - 1));
+                    } else {
+                        let at = start.min(self.queue.items.len() - 1);
+                        self.start_track(at, 0, true);
+                    }
+                }
+                Ok(Reply::Ok)
+            }
             Request::Shuffle => {
+                if self.queue.len() > 1 {
+                    self.push_history();
+                }
                 self.queue.shuffle();
                 if let Some(name) = self.queue_name.clone()
                     && let Some(items) = self.named.get_mut(&name)
@@ -126,6 +165,11 @@ impl Engine {
                 Ok(Reply::Status(Box::new(self.status())))
             }
             Request::Move { from, to } => {
+                let len = self.queue.len();
+                if from >= len || to >= len {
+                    return Err(format!("下标超出队列范围（0..{len}）"));
+                }
+                self.push_history();
                 self.queue.move_item(from, to)?;
                 if let Some(name) = self.queue_name.clone()
                     && let Some(items) = self.named.get_mut(&name)
@@ -227,6 +271,14 @@ impl Engine {
                 });
                 Ok(Reply::Status(Box::new(self.status())))
             }
+            Request::Undo => match self.undo() {
+                Ok(()) => Ok(Reply::Status(Box::new(self.status()))),
+                Err(e) => Err(e),
+            },
+            Request::Redo => match self.redo() {
+                Ok(()) => Ok(Reply::Status(Box::new(self.status()))),
+                Err(e) => Err(e),
+            },
             Request::Back => match self.peek.as_ref() {
                 Some(_) => {
                     self.restore();

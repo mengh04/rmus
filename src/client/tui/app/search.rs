@@ -9,7 +9,7 @@
 //!   定位、`i` 或 `/` 回到输入。
 
 use super::state::parse_tracks;
-use super::{App, Mode, SearchMode, SearchState, Tab};
+use super::{App, Mode, SearchMode, SearchState};
 use crate::proto::{Request, StatusInfo, TrackInfo};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::{Path, PathBuf};
@@ -323,19 +323,10 @@ impl App {
 
     /// 切到音乐库视图，光标停到这首曲子上。
     pub(super) fn locate_in_library(&mut self, path: &Path) {
-        // 现拉一次库列表（切视图本来也会刷新），拿到最新下标才能定位
-        if let Ok(value) = self.daemon.request(Request::LibList) {
-            self.library = parse_tracks(&value);
-            self.clamp_selections();
-        }
-        let index = self.library.iter().position(|t| t.path == path);
-        self.tab = Tab::Library;
-        match index {
-            Some(i) => {
-                self.library_selected = i;
-                self.close_search();
-            }
-            None => self.notify("这首曲子不在音乐库里", true),
+        if self.reveal_in_library(path) {
+            self.close_search();
+        } else {
+            self.notify("这首曲子不在音乐库里", true);
         }
     }
 

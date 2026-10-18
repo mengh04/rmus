@@ -30,6 +30,7 @@ impl App {
             Bottom => self.set_selection(usize::MAX),
             HalfUp => self.move_selection(-7),
             HalfDown => self.move_selection(7),
+            LocateInLibrary => self.locate_selected_in_library(),
             PlaySelected => self.play_selected(),
             PlayToggle => self.simple(Request::TogglePlay),
             Next => self.simple(Request::Next),
@@ -74,6 +75,16 @@ impl App {
             Back => self.simple(Request::Back),
             CycleRepeat => self.simple(Request::SetRepeat { mode: None }),
             Seek(delta) => self.simple(Request::SeekRelative { delta_ms: delta }),
+            Undo => {
+                self.simple(Request::Undo);
+                self.need_queue = true;
+            }
+            Redo => {
+                self.simple(Request::Redo);
+                self.need_queue = true;
+            }
+            PutAfter => self.put_from_register(true),
+            PutBefore => self.put_from_register(false),
             ToggleRandom => self.simple(Request::SetRandom { on: None }),
             VolumeUp => self.simple(Request::AdjustVolume { delta: 0.05 }),
             VolumeDown => self.simple(Request::AdjustVolume { delta: -0.05 }),

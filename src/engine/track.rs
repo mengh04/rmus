@@ -10,6 +10,7 @@ impl Engine {
     /// 插播：插到当前曲后立即播放；空队列/未开始时作为第一曲。
     /// 播完由 on_eof 正常继续队列，不打断原有队列结构。
     pub(super) fn play_now(&mut self, item: QueueItem) {
+        self.push_history();
         let at = match self.queue.current {
             Some(cur) => cur + 1,
             None => 0,

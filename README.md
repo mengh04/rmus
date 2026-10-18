@@ -55,10 +55,19 @@ Run `rmus` with no subcommand to open the interactive player:
 
 ### Editing the queue
 
+- Vim motions with counts: `3j` / `5k` move, `5gg` / `5G` jump to line 5, `0` goes to the top,
+  `2C-d` / `2C-u` scroll half pages, `3J` / `3K` reorder faster
+- `dd` removes the selected track (queue and playlists), nvim-style: `dj` / `dk` / `dG` / `dgg`
+  delete down / up / to the end / to the top, all undoable in one step
+- `yy` yanks the selected track (queue or library) into the register; `p` / `P` put it after /
+  before the queue cursor
+- `u` undoes the last queue change (delete, clear, shuffle, reorder, insert), `C-r` redoes
+- `gt` / `gT` switch views (`2gt` jumps to view 2)
 - `J` / `K` move the selected track down / up inside the queue; the cursor follows the track
-- `d` removes the selected track, `D` / `x` remove the playing one, `C` clears, `S` shuffles
+- `D` / `x` remove the playing one, `C` clears, `S` shuffles
 - `c` renames the current queue (an anonymous queue gets its first name; a named one keeps its
   history under the new name)
+- `gd` locates the selected queue track in the library view
 - In the search overlay: `Esc` toggles between input and a vim-like normal mode. In normal mode
   `j`/`k` move, `gg`/`G` jump, `Enter` jump-plays, `o` plays it after the current track, `a`
   appends to the end of the queue, `gf` locates the track in the library view, `i` or `/` returns
