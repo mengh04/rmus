@@ -14,6 +14,6 @@ mod popup;
 mod text;
 
 pub use hints::{empty_state, key_hints};
-pub use paint::{bar, canvas, fill, list_row_bg, rule};
+pub use paint::{bar, canvas, fill, list_row_bg, list_row_bg_visual, rule};
 pub use popup::{POPUP_CHROME, popup};
 pub use text::{fit, input_line, pad_right};

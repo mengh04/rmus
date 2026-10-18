@@ -88,7 +88,7 @@ pub const SEEK_STEP_MS: i64 = 10_000;
 ///
 /// 前缀键 `g` / `d` / `y`（gg gd gt gT / dd dj dk dG dgg / yy）由
 /// `App::handle_key` 的 operator-pending 状态机拦截，这里收不到；
-/// 数字键也不经过这里——它们是 vim count，同样在 App 里缓冲。
+/// 数字键切视图，同样在 App::handle_key 里先行处理。
 pub fn resolve(key: KeyEvent) -> Option<Action> {
     use Action::*;
     match (key.modifiers, key.code) {
@@ -118,6 +118,7 @@ pub fn resolve(key: KeyEvent) -> Option<Action> {
             '?' => Some(Help),
             'j' => Some(Down),
             'k' => Some(Up),
+            '0' => Some(Top),
             'h' => Some(PrevTab),
             'l' => Some(NextTab),
             ' ' => Some(PlayToggle),
@@ -156,11 +157,17 @@ pub fn resolve(key: KeyEvent) -> Option<Action> {
     }
 }
 
+/// 数字键 1..=9 -> tab 下标；单独拆出来避免和普通字符键混在一起。
+pub fn resolve_digit(c: char, tab_count: usize) -> Option<Action> {
+    let n = c.to_digit(10)? as usize;
+    (n >= 1 && n <= tab_count).then_some(Action::GotoTab(n - 1))
+}
+
 /// 帮助浮层内容：(按键, 说明)。新加键位记得同步这里。
 pub const HELP: &[(&str, &str)] = &[
-    ("j / k / ↑↓", "上下移动（数字=count，如 3j）"),
-    ("gg / G", "跳到顶部 / 底部（5gg = 第 5 行）"),
-    ("0", "跳到顶部"),
+    ("j / k / ↑↓", "上下移动"),
+    ("0 / gg / G", "跳到顶部 / 底部"),
+    ("数字 1-4 / gt / gT", "切换视图（2gt = 第 2 个）"),
     ("gd", "队列选中曲在音乐库定位"),
     ("C-d / C-u", "向下 / 向上翻半页"),
     ("Enter", "播放选中项"),
@@ -169,6 +176,7 @@ pub const HELP: &[(&str, &str)] = &[
     ("s", "停止"),
     ("dd", "剪切选中曲进寄存器（队列 / 播放列表）"),
     ("dj / dk / dG / dgg", "队列范围剪切：向下 / 向上 / 到底 / 到顶"),
+    ("v", "visual 选段：d 剪切 / y 复制 / o 对调 / Esc 退出"),
     ("D / x", "删除正在播放的曲"),
     ("d / Enter / x", "在线视图：下载 / 下载并试听 / 取消下载"),
     ("yy", "复制选中曲到寄存器（队列 / 音乐库）"),

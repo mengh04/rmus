@@ -141,4 +141,13 @@ impl Theme {
             self.style_raised()
         }
     }
+
+    /// visual 选段的整行底色：比选中行更冷一档（钢蓝），和光标行区分开。
+    pub fn style_visual(&self) -> Style {
+        if self.mono {
+            Style::new().add_modifier(Modifier::DIM)
+        } else {
+            Style::new().bg(self.cool)
+        }
+    }
 }

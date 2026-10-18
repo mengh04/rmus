@@ -1,7 +1,7 @@
 //! 列表选中项：移动、播放选中、删除、队列内调序、首次定位。
 
 use super::state::parse_tracks;
-use super::{App, Tab};
+use super::{App, Tab, VisualSel};
 use crate::proto::Request;
 use std::path::{Path, PathBuf};
 
@@ -148,6 +148,95 @@ impl App {
         }
     }
 
+    /// 当前 visual 选段（含两端，按列表长度夹紧）。
+    /// 没开 visual 或当前视图不可选段（在线）则 None。
+    pub fn visual_range(&self) -> Option<(usize, usize)> {
+        let anchor = self.visual?.anchor;
+        let (cursor, len) = match self.tab {
+            Tab::Queue => (self.queue_selected, self.queue.len()),
+            Tab::Library => (self.library_selected, self.library.len()),
+            Tab::Playlists => (self.playlists_selected, self.playlists.len()),
+            Tab::Online => return None,
+        };
+        if len == 0 {
+            return None;
+        }
+        let (lo, hi) = if anchor <= cursor {
+            (anchor, cursor)
+        } else {
+            (cursor, anchor)
+        };
+        Some((lo.min(len - 1), hi.min(len - 1)))
+    }
+
+    pub(super) fn exit_visual(&mut self) {
+        self.visual = None;
+    }
+
+    /// o：光标跳到选段另一端，往反方向延展。
+    pub(super) fn visual_swap_ends(&mut self) {
+        let Some(v) = self.visual else {
+            return;
+        };
+        let cursor = match self.tab {
+            Tab::Queue => self.queue_selected,
+            Tab::Library => self.library_selected,
+            Tab::Playlists => self.playlists_selected,
+            Tab::Online => return,
+        };
+        self.visual = Some(VisualSel { anchor: cursor });
+        self.set_selection(v.anchor);
+    }
+
+    /// visual d / x：把选段剪切进寄存器。
+    /// 队列走范围剪切（一次撤销）；播放列表逐个删；音乐库不可删。
+    pub(super) fn visual_cut(&mut self) {
+        let Some((start, end)) = self.visual_range() else {
+            self.exit_visual();
+            return;
+        };
+        match self.tab {
+            Tab::Queue => self.delete_queue_range(start, end + 1),
+            Tab::Playlists => {
+                let names: Vec<String> = self.playlists[start..=end].to_vec();
+                for name in names {
+                    self.simple(Request::PlaylistRemove { name: name.clone() });
+                    self.notify(format!("已删除播放列表 “{name}”"), false);
+                }
+                self.need_playlists = true;
+            }
+            Tab::Library => self.notify("音乐库不能删", true),
+            Tab::Online => {}
+        }
+        self.exit_visual();
+    }
+
+    /// visual y：把选段整段复制进寄存器（队列 / 音乐库）。
+    pub(super) fn visual_yank(&mut self) {
+        let Some((start, end)) = self.visual_range() else {
+            self.exit_visual();
+            return;
+        };
+        let yank = |items: &[crate::proto::TrackInfo]| {
+            Some(
+                items[start..=end]
+                    .iter()
+                    .map(|t| (t.path.clone(), t.title.clone()))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let (registered, n) = match self.tab {
+            Tab::Queue => (yank(&self.queue), end - start + 1),
+            Tab::Library => (yank(&self.library), end - start + 1),
+            Tab::Playlists | Tab::Online => (None, 0),
+        };
+        if let Some(items) = registered {
+            self.register = Some(items);
+            self.notify(format!("已复制 {n} 首（p 粘贴）"), false);
+        }
+        self.exit_visual();
+    }
+
     /// 把音乐库视图切到 path 这首曲子上：现拉一次库列表拿到最新下标，
     /// 光标停上去。找到返回 true（找不到不动视图）。
     /// 搜索面板的 gf 与队列的 gd 共用。
@@ -161,6 +250,7 @@ impl App {
         };
         self.library_selected = index;
         self.tab = Tab::Library;
+        self.exit_visual();
         true
     }
 

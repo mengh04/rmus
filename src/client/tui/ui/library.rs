@@ -7,7 +7,7 @@ use super::super::app::App;
 use super::list::window;
 use super::queue::{columns::columns, row};
 use super::theme::Theme;
-use super::widgets::{empty_state, list_row_bg, rule};
+use super::widgets::{empty_state, list_row_bg_visual, rule};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 
@@ -60,8 +60,9 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         let track = &app.library[i];
         let playing = playing_path.is_some_and(|p| p == track.path.as_path());
         let is_selected = i == selected;
+        let is_visual = app.visual_range().is_some_and(|(a, b)| a <= i && i <= b);
         let row_area = Rect::new(list.x, y, list.width, 1);
-        list_row_bg(frame.buffer_mut(), theme, row_area, is_selected, playing);
+        list_row_bg_visual(frame.buffer_mut(), theme, row_area, is_selected, playing, is_visual);
         row::draw_row(frame, theme, cols, row_area, track, playing, is_selected);
     }
 }

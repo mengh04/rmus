@@ -46,8 +46,20 @@ pub fn draw(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         frame.render_widget(Paragraph::new(right).alignment(Alignment::Right), area);
     }
 
+    let hints: &[(&str, &str)] = if app.visual.is_some() {
+        &[
+            ("j/k", "选段"),
+            ("d", "剪切"),
+            ("y", "复制"),
+            ("o", "对调"),
+            ("Esc", "退出"),
+        ]
+    } else {
+        keys_for(app.tab)
+    };
+
     frame.render_widget(
-        Paragraph::new(key_hints(theme, keys_for(app.tab), left.width)),
+        Paragraph::new(key_hints(theme, hints, left.width)),
         left,
     );
 }

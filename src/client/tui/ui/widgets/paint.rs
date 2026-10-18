@@ -89,6 +89,21 @@ pub fn bar(
 
 /// 列表行底：选中铺抬起的底，正在播放铺左边一格强调条。
 pub fn list_row_bg(buf: &mut Buffer, theme: &Theme, area: Rect, selected: bool, playing: bool) {
+    list_row_bg_visual(buf, theme, area, selected, playing, false)
+}
+
+/// 带 visual 选段位的版本：visual 行铺冷色底，光标行的选中底盖在上面。
+pub fn list_row_bg_visual(
+    buf: &mut Buffer,
+    theme: &Theme,
+    area: Rect,
+    selected: bool,
+    playing: bool,
+    visual: bool,
+) {
+    if visual {
+        fill(buf, area, theme.style_visual());
+    }
     if selected {
         fill(buf, area, theme.style_selected());
     }

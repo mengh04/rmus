@@ -117,6 +117,7 @@ impl App {
     /// 进在线视图时刷新插件清单（可能刚装了插件、重启了 daemon）。
     fn switch_tab(&mut self, tab: Tab) {
         self.tab = tab;
+        self.exit_visual();
         match tab {
             Tab::Library => self.need_library = true,
             Tab::Online => self.need_plugins = true,

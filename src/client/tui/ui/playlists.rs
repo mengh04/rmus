@@ -2,7 +2,7 @@
 
 use super::super::app::App;
 use super::theme::Theme;
-use super::widgets::{empty_state, fit, list_row_bg, rule};
+use super::widgets::{empty_state, fit, list_row_bg_visual, rule};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::Style;
@@ -59,8 +59,9 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         let name = &app.playlists[i];
         let is_selected = i == selected;
         let playing = app.current_playlist.as_deref() == Some(name.as_str());
+        let is_visual = app.visual_range().is_some_and(|(a, b)| a <= i && i <= b);
         let row_area = Rect::new(list.x, y, list.width, 1);
-        list_row_bg(frame.buffer_mut(), theme, row_area, is_selected, playing);
+        list_row_bg_visual(frame.buffer_mut(), theme, row_area, is_selected, playing, is_visual);
 
         // 序号
         let idx = Span::styled(
