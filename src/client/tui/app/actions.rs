@@ -43,6 +43,10 @@ impl App {
             RemoveCurrent => match self.tab {
                 Tab::Online => self.cancel_selected_download(),
                 _ => {
+                    // vim 剪切语义：删掉的正在播的曲子也进寄存器
+                    if let Some(track) = self.status.as_ref().and_then(|s| s.track.clone()) {
+                        self.register = Some(vec![(track.path, track.title)]);
+                    }
                     self.simple(Request::Remove { index: None });
                     self.need_queue = true;
                 }

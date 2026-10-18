@@ -90,8 +90,9 @@ pub struct App {
     pending: Pending,
     /// vim count：数字缓冲（3j、5gg、2dd 里的 3）。0 = 没在攒。
     count: u32,
-    /// 未命名寄存器：yy 复制的曲子（路径 + 标题），p / P 粘贴进队列
-    register: Option<(std::path::PathBuf, String)>,
+    /// 未命名寄存器：yy 复制、dd / dj 等剪切进来的曲子（路径 + 标题），
+    /// p / P 粘贴进队列。vim 的删除即剪切。
+    register: Option<Vec<(std::path::PathBuf, String)>>,
 
     pub help_open: bool,
     pub message: Option<Message>,
@@ -274,14 +275,14 @@ impl App {
                     self.execute(Action::PrevTab);
                 }
             }
-            // dd 删选中行（[count]dd = 连删 count 行）
+            // dd 删选中行（[count]dd = 连删 count 行）；删掉进寄存器
             (Pending::Delete, KM::NONE, KeyCode::Char('d')) => {
                 self.count = 0;
                 if count > 0 {
                     let sel = self.queue_selected;
                     self.delete_queue_range(sel, sel + count as usize);
                 } else {
-                    self.execute(Action::RemoveSelected);
+                    self.cut_selected_line();
                 }
             }
             // dj / dk / dG / dgg：队列范围删

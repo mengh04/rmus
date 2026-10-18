@@ -3,7 +3,7 @@
 use super::state::parse_tracks;
 use super::{App, Tab};
 use crate::proto::Request;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 impl App {
     /// 当前活动列表的长度（仅 Normal 模式；搜索面板的选择自己管）。
@@ -173,10 +173,40 @@ impl App {
         let len = self.queue.len();
         let start = start.min(len - 1);
         let end = end.min(len).max(start + 1);
+        // vim 剪切语义：删掉的整段进寄存器
+        self.register = Some(
+            self.queue[start..end]
+                .iter()
+                .map(|t| (t.path.clone(), t.title.clone()))
+                .collect(),
+        );
+        let n = end - start;
         self.simple(Request::RemoveRange { start, end });
         self.need_queue = true;
         // 光标停在删除点（列表刷新后 clamp_selections 兜底）
         self.queue_selected = start;
+        self.notify(format!("已剪切 {n} 首（p 粘贴）"), false);
+    }
+
+    /// dd：删除选中行，删掉的曲子进寄存器（vim 剪切语义，dd + p = 移动）。
+    /// 队列视图剪切曲目；播放列表视图只删不留（寄存器只装曲子）。
+    pub(super) fn cut_selected_line(&mut self) {
+        match self.tab {
+            Tab::Queue => {
+                let Some(track) = self.queue.get(self.queue_selected) else {
+                    return;
+                };
+                let (path, title) = (track.path.clone(), track.title.clone());
+                self.register = Some(vec![(path, title.clone())]);
+                self.simple(Request::Remove {
+                    index: Some(self.queue_selected),
+                });
+                self.need_queue = true;
+                self.notify(format!("已剪切 {title}（p 粘贴）"), false);
+            }
+            Tab::Playlists => self.remove_selected(),
+            Tab::Library | Tab::Online => {}
+        }
     }
 
     /// yy：把选中曲复制进未命名寄存器（队列 / 音乐库视图可用）。
@@ -195,7 +225,7 @@ impl App {
         match yanked {
             Some((path, title)) => {
                 self.notify(format!("已复制 {title}（p 粘贴到队列）"), false);
-                self.register = Some((path, title));
+                self.register = Some(vec![(path, title)]);
             }
             None => self.notify("这里没有可复制的曲子", true),
         }
@@ -203,11 +233,11 @@ impl App {
 
     /// p / P：把寄存器里的曲子插到队列光标后 / 前（队列空则直接加入）。
     pub(super) fn put_from_register(&mut self, after: bool) {
-        let Some((path, title)) = self.register.clone() else {
-            self.notify("寄存器是空的，先用 yy 复制一首", true);
+        let Some(items) = self.register.clone() else {
+            self.notify("寄存器是空的，先用 yy / dd 剪切", true);
             return;
         };
-        // Add 落队尾（下标 = 当前长度），再 Move 到插入点；
+        // Add 一次落队尾（下标从 len 起），再逐个挪到插入点；
         // vim 语义：p 在光标后、P 在光标前
         let len = self.queue.len();
         let target = match (after, len) {
@@ -215,17 +245,24 @@ impl App {
             (true, _) => (self.queue_selected + 1).min(len),
             (false, _) => self.queue_selected.min(len),
         };
-        if !self.enqueue_path(&path, &title) {
+        let paths: Vec<PathBuf> = items.iter().map(|(p, _)| p.clone()).collect();
+        if let Err(e) = self.daemon.request(Request::Add { paths }) {
+            self.notify(format!("{e}"), true);
             return;
         }
-        if target != len {
-            self.simple(Request::Move {
-                from: len,
-                to: target,
-            });
+        // 第 i 首加完在 len+i；挪到 target+i 后，剩下的仍在 len+i
+        for i in 0..items.len() {
+            if target + i != len + i {
+                self.simple(Request::Move {
+                    from: len + i,
+                    to: target + i,
+                });
+            }
         }
         self.need_queue = true;
+        // 光标停在贴进来的第一首上
         self.queue_selected = target;
+        self.notify(format!("已粘贴 {} 首", items.len()), false);
     }
 
     pub(super) fn clamp_selections(&mut self) {
