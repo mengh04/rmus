@@ -75,19 +75,13 @@ impl Engine {
         }
     }
 
-    /// 恢复快照并广播。同步命名队列存档；正在播的曲子不在恢复后的
+    /// 恢复快照并广播。正在播的曲子不在恢复后的
     /// 队列里时，从恢复点曲目重头播（不打断时保持原进度）。
     fn apply_snapshot(&mut self, snap: Snapshot) {
         let playing_path = self.queue.current_item().map(|i| i.path.clone());
         self.queue.items = snap.items;
         self.queue.current = snap.current;
         self.queue_name = snap.queue_name;
-        // 恢复的是命名队列：同步它的存档
-        if let Some(name) = self.queue_name.clone()
-            && let Some(items) = self.named.get_mut(&name)
-        {
-            *items = self.queue.items.clone();
-        }
         self.dirty = true;
         self.emit(Event::QueueChanged);
         let same_track = self

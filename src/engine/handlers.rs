@@ -68,10 +68,6 @@ impl Engine {
                 }
                 self.kill_decoder();
                 self.queue.clear();
-                // 当前是命名队列时同步清空它
-                if let Some(name) = self.queue_name.clone() {
-                    self.named.insert(name, Vec::new());
-                }
                 self.state = PlayState::Stopped;
                 self.seek_base_ms = 0;
                 self.dirty = true;
@@ -95,12 +91,6 @@ impl Engine {
                 }
                 self.push_history();
                 let removed_current = self.queue.remove(index);
-                if let Some(name) = self.queue_name.clone()
-                    && let Some(items) = self.named.get_mut(&name)
-                    && index < items.len()
-                {
-                    items.remove(index);
-                }
                 self.dirty = true;
                 self.emit(Event::QueueChanged);
                 if removed_current {
@@ -131,14 +121,6 @@ impl Engine {
                 for i in (start..end).rev() {
                     self.queue.remove(i);
                 }
-                // 存档可能与队列有长度偏差（历史版本的 Add/插播只进队列），
-                // 越界 drain 会 panic 并杀死引擎线程 -> 整个 daemon 无响应
-                if let Some(name) = self.queue_name.clone()
-                    && let Some(items) = self.named.get_mut(&name)
-                {
-                    let (start, end) = clamp_drain(start, end, items.len());
-                    items.drain(start..end);
-                }
                 self.dirty = true;
                 self.emit(Event::QueueChanged);
                 if removed_current {
@@ -158,11 +140,6 @@ impl Engine {
                     self.push_history();
                 }
                 self.queue.shuffle();
-                if let Some(name) = self.queue_name.clone()
-                    && let Some(items) = self.named.get_mut(&name)
-                {
-                    *items = self.queue.items.clone();
-                }
                 self.dirty = true;
                 self.emit(Event::QueueChanged);
                 Ok(Reply::Status(Box::new(self.status())))
@@ -174,42 +151,37 @@ impl Engine {
                 }
                 self.push_history();
                 self.queue.move_item(from, to)?;
-                if let Some(name) = self.queue_name.clone()
-                    && let Some(items) = self.named.get_mut(&name)
-                {
-                    *items = self.queue.items.clone();
-                }
                 self.dirty = true;
                 self.emit(Event::QueueChanged);
                 Ok(Reply::Ok)
             }
             Request::PlaylistsList => {
-                let names = self.named.keys().cloned().collect();
+                let names = self.playlists.keys().cloned().collect();
                 Ok(Reply::Playlists {
                     names,
                     current: self.queue_name.clone(),
                 })
             }
             Request::PlaylistNew { name } => {
-                if self.named.contains_key(&name) {
-                    return Err(format!("队列 {name} 已存在"));
+                if self.playlists.contains_key(&name) {
+                    return Err(format!("播放列表 {name} 已存在"));
                 }
-                self.named.insert(name, Vec::new());
+                self.playlists.insert(name, Vec::new());
                 self.dirty = true;
                 Ok(Reply::Ok)
             }
             Request::PlaylistSave { name } => {
-                self.named.insert(name.clone(), self.queue.items.clone());
+                self.playlists.insert(name.clone(), self.queue.items.clone());
                 self.queue_name = Some(name);
                 self.dirty = true;
                 Ok(Reply::Ok)
             }
             Request::PlaylistPlay { name } => {
-                let Some(items) = self.named.get(&name) else {
-                    return Err(format!("队列 {name} 不存在"));
+                let Some(items) = self.playlists.get(&name) else {
+                    return Err(format!("播放列表 {name} 不存在"));
                 };
                 if items.is_empty() {
-                    return Err(format!("队列 {name} 是空的"));
+                    return Err(format!("播放列表 {name} 是空的"));
                 }
                 let items = items.clone();
                 // 显式换队列 = 放弃试听恢复点
@@ -217,6 +189,7 @@ impl Engine {
                 self.kill_decoder();
                 self.queue.items = items;
                 self.queue.current = None;
+                // 复制进队列，之后各播各的：queue_name 只是来源标签
                 self.queue_name = Some(name);
                 self.dirty = true;
                 self.emit(Event::QueueChanged);
@@ -224,11 +197,8 @@ impl Engine {
                 Ok(Reply::Status(Box::new(self.status())))
             }
             Request::PlaylistRemove { name } => {
-                if self.queue_name.as_deref() == Some(name.as_str()) {
-                    return Err(format!("队列 {name} 正在播放，无法删除"));
-                }
-                if self.named.remove(&name).is_none() {
-                    return Err(format!("队列 {name} 不存在"));
+                if self.playlists.remove(&name).is_none() {
+                    return Err(format!("播放列表 {name} 不存在"));
                 }
                 self.dirty = true;
                 Ok(Reply::Ok)
@@ -237,15 +207,15 @@ impl Engine {
                 if from == to {
                     return Ok(Reply::Ok);
                 }
-                if !self.named.contains_key(&from) {
-                    return Err(format!("队列 {from} 不存在"));
+                if !self.playlists.contains_key(&from) {
+                    return Err(format!("播放列表 {from} 不存在"));
                 }
-                if self.named.contains_key(&to) {
-                    return Err(format!("队列 {to} 已存在"));
+                if self.playlists.contains_key(&to) {
+                    return Err(format!("播放列表 {to} 已存在"));
                 }
-                let items = self.named.remove(&from).unwrap_or_default();
-                self.named.insert(to.clone(), items);
-                // 正在播的就是这张：顶栏显示的名字跟随
+                let items = self.playlists.remove(&from).unwrap_or_default();
+                self.playlists.insert(to.clone(), items);
+                // 正在播的队列来自这张：来源标签跟随
                 if self.queue_name.as_deref() == Some(from.as_str()) {
                     self.queue_name = Some(to);
                 }
@@ -306,34 +276,5 @@ impl Engine {
                 Err("内部错误：库请求未在 daemon 层处理".into())
             }
         }
-    }
-}
-
-/// 把删除范围夹进给定长度（起点不得超过终点，两端都不得超过 len）。
-/// 返回 (start, end)；完全越界的范围夹成 (len, len)，drain 成空操作。
-fn clamp_drain(start: usize, end: usize, len: usize) -> (usize, usize) {
-    let start = start.min(len);
-    (start, end.max(start).min(len))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::clamp_drain;
-
-    #[test]
-    fn 范围在界内保持不变() {
-        assert_eq!(clamp_drain(0, 3, 5), (0, 3));
-        assert_eq!(clamp_drain(2, 5, 5), (2, 5));
-    }
-
-    #[test]
-    fn 越界部分被夹掉() {
-        assert_eq!(clamp_drain(3, 7, 5), (3, 5));
-    }
-
-    #[test]
-    fn 完全越界夹成空段() {
-        assert_eq!(clamp_drain(5, 6, 5), (5, 5));
-        assert_eq!(clamp_drain(7, 9, 5), (5, 5));
     }
 }

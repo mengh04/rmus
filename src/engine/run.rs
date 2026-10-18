@@ -1,6 +1,5 @@
 //! 引擎事件循环：命令、解码线程回报、位置推送、按需落盘。
 
-use super::queue::QueueItem;
 use super::{Engine, POSITION_EVENT_INTERVAL, ToEngine};
 use crate::proto::{Event, PlayState, Reply};
 use std::sync::mpsc;
@@ -28,13 +27,6 @@ impl Engine {
                         self.push_history();
                     }
                     let added = items.len();
-                    // 当前队列是命名队列：存档同步追加，与 Remove/Move/Undo
-                    // 的同步行为保持一致（失步会让 RemoveRange 越界）
-                    if let Some(name) = self.queue_name.clone()
-                        && let Some(archived) = self.named.get_mut(&name)
-                    {
-                        archived.extend(items.iter().cloned());
-                    }
                     self.queue.items.extend(items);
                     self.dirty = true;
                     self.emit(Event::QueueChanged);
@@ -71,22 +63,9 @@ impl Engine {
                 Ok(ToEngine::PlaylistAddScanned {
                     name, items, reply, ..
                 }) => {
+                    // 纯播放列表编辑：动的是"文件"，不碰正在播放的队列
                     let added = items.len();
-                    // 加的就是当前队列才可撤销（改别的命名队列不在撤销范围）
-                    if self.queue_name.as_deref() == Some(name.as_str()) && !items.is_empty() {
-                        self.push_history();
-                    }
-                    self.named.entry(name.clone()).or_default().extend(items);
-                    if self.queue_name.as_deref() == Some(name.as_str()) {
-                        // 命名队列就是当前队列：同步追加，播放体验连续
-                        let extra: Vec<QueueItem> = self
-                            .named
-                            .get(&name)
-                            .map(|items| items[items.len() - added..].to_vec())
-                            .unwrap_or_default();
-                        self.queue.items.extend(extra);
-                        self.emit(Event::QueueChanged);
-                    }
+                    self.playlists.entry(name).or_default().extend(items);
                     self.dirty = true;
                     let _ = reply.send(Ok(Reply::Added { added }));
                 }

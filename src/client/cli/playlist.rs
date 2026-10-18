@@ -1,4 +1,4 @@
-//! `rmus pl ...`：命名队列管理。
+//! `rmus pl ...`：播放列表管理。
 
 use crate::Pl;
 use anyhow::{Context, Result};
@@ -13,10 +13,10 @@ pub(crate) fn handle_pl(client: &mut Client, pl: &Pl) -> Result<()> {
             let value = client.request(Request::PlaylistsList)?;
             let names: Vec<String> =
                 serde_json::from_value(value.get("names").cloned().unwrap_or_default())
-                    .context("解析队列列表失败")?;
+                    .context("解析播放列表失败")?;
             let current = value.get("current").and_then(|v| v.as_str());
             if names.is_empty() {
-                println!("（没有命名队列，rmus pl save 名字 可保存当前队列）");
+                println!("（没有播放列表，rmus pl save 名字 可把当前队列存为播放列表）");
                 return Ok(());
             }
             for name in names {
@@ -30,11 +30,11 @@ pub(crate) fn handle_pl(client: &mut Client, pl: &Pl) -> Result<()> {
         }
         Pl::New { name } => {
             client.request(Request::PlaylistNew { name: name.clone() })?;
-            println!("队列 {name} 已创建");
+            println!("播放列表 {name} 已创建");
         }
         Pl::Save { name } => {
             client.request(Request::PlaylistSave { name: name.clone() })?;
-            println!("当前队列已保存为 {name}");
+            println!("当前队列已保存为播放列表 {name}");
         }
         Pl::Play { name } => {
             let value = client.request(Request::PlaylistPlay { name: name.clone() })?;
@@ -46,18 +46,18 @@ pub(crate) fn handle_pl(client: &mut Client, pl: &Pl) -> Result<()> {
                 paths: paths.clone(),
             })?;
             let added = value.get("added").and_then(|v| v.as_u64()).unwrap_or(0);
-            println!("已向队列 {name} 添加 {added} 首");
+            println!("已向播放列表 {name} 添加 {added} 首");
         }
         Pl::Remove { name } => {
             client.request(Request::PlaylistRemove { name: name.clone() })?;
-            println!("队列 {name} 已删除");
+            println!("播放列表 {name} 已删除");
         }
         Pl::Rename { from, to } => {
             client.request(Request::PlaylistRename {
                 from: from.clone(),
                 to: to.clone(),
             })?;
-            println!("队列 {from} 已重命名为 {to}");
+            println!("播放列表 {from} 已重命名为 {to}");
         }
     }
     Ok(())

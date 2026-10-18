@@ -64,7 +64,7 @@ enum Command {
     Repeat { mode: Option<String> },
     /// 随机播放：无参数切换；或 on/off
     Random { mode: Option<String> },
-    /// 命名队列（播放列表）管理
+    /// 播放列表管理
     #[command(subcommand)]
     Pl(Pl),
     /// 库操作
@@ -90,19 +90,19 @@ enum Command {
 
 #[derive(Subcommand)]
 enum Pl {
-    /// 列出所有命名队列
+    /// 列出所有播放列表
     List,
-    /// 创建空队列
+    /// 创建空播放列表
     New { name: String },
-    /// 把当前队列保存为命名队列（覆盖同名；当前队列即变为该命名队列）
+    /// 把当前队列保存为播放列表（覆盖同名；当前队列即变为该播放列表）
     Save { name: String },
-    /// 切换到命名队列并从头播放
+    /// 播放列表复制进队列并从头播放（之后互不影响）
     Play { name: String },
-    /// 添加文件/目录到命名队列（不存在则创建；正播放该队列时立即生效）
+    /// 添加文件/目录到播放列表（不存在则创建；不影响正在播放的队列）
     Add { name: String, paths: Vec<PathBuf> },
-    /// 删除命名队列（正在播放的除外）
+    /// 删除播放列表（不影响正在播放的队列）
     Remove { name: String },
-    /// 重命名命名队列（正在播放的跟随改名）
+    /// 重命名播放列表（正在播的队列来源标签跟随改名）
     Rename { from: String, to: String },
 }
 

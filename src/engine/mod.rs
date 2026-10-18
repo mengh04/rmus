@@ -75,7 +75,7 @@ pub enum ToEngine {
         item: QueueItem,
         reply: oneshot::Sender<Result<Reply, String>>,
     },
-    /// daemon 层完成扫描后追加到命名队列
+    /// daemon 层完成扫描后追加到播放列表
     PlaylistAddScanned {
         id: u64,
         name: String,
@@ -98,10 +98,11 @@ pub(super) struct DecoderHandle {
 
 pub struct Engine {
     queue: Queue,
-    /// 当前队列的名字；None = 匿名临时队列（open/add 出来的）
+    /// 队列来源标签（来源播放列表的名字）；None = 匿名临时队列（open/add 出来的）。
+    /// 仅用于顶栏显示和 `w` 的默认保存目标——队列怎么改都不回写播放列表
     queue_name: Option<String>,
-    /// 命名队列（播放列表）
-    named: BTreeMap<String, Vec<QueueItem>>,
+    /// 播放列表：持久命名集合。播放 = 复制进队列，保存 = PlaylistSave 显式写回
+    playlists: BTreeMap<String, Vec<QueueItem>>,
     repeat: RepeatMode,
     random: bool,
     state: PlayState,
@@ -155,7 +156,7 @@ impl Engine {
         Ok(Self {
             queue,
             queue_name: persisted.queue_name,
-            named: persisted.named,
+            playlists: persisted.playlists,
             repeat: persisted.repeat.unwrap_or_default(),
             random: persisted.random.unwrap_or(false),
             state: PlayState::Stopped,
@@ -182,7 +183,7 @@ impl Engine {
             queue_name: self.queue_name.clone(),
             current_index: self.queue.current,
             current_queue: self.queue.items.clone(),
-            named: self.named.clone(),
+            playlists: self.playlists.clone(),
         });
     }
 

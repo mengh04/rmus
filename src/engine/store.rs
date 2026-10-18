@@ -1,4 +1,4 @@
-//! 引擎状态持久化：命名队列 + 当前队列 + 播放模式 + 音量。
+//! 引擎状态持久化：播放列表 + 当前队列（会话恢复）+ 播放模式 + 音量。
 //!
 //! 落盘 $XDG_STATE_HOME/rmus/state.json，队列/模式/音量变更时同步写
 //! （变更频率是用户操作级，写盘 ~ms 级，不值得引入异步落盘）。
@@ -19,8 +19,9 @@ pub struct PersistedState {
     pub current_index: Option<usize>,
     #[serde(default)]
     pub current_queue: Vec<QueueItem>,
-    #[serde(default)]
-    pub named: BTreeMap<String, Vec<QueueItem>>,
+    /// 播放列表（持久命名集合）。旧版字段名叫 named，alias 兼容读取旧状态文件
+    #[serde(default, alias = "named")]
+    pub playlists: BTreeMap<String, Vec<QueueItem>>,
 }
 
 pub fn state_file() -> PathBuf {
@@ -58,5 +59,37 @@ pub fn save(state: &PersistedState) {
     let tmp = path.with_extension("json.tmp");
     if std::fs::write(&tmp, text).is_ok() && std::fs::rename(&tmp, &path).is_err() {
         eprintln!("[rmusd] 状态落盘失败: {}", path.display());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 旧字段名named兼容读取() {
+        let state: PersistedState =
+            serde_json::from_str(r#"{"named": {"摇滚": [], "流行": []}}"#).unwrap();
+        assert!(state.playlists.contains_key("摇滚"));
+        assert!(state.playlists.contains_key("流行"));
+    }
+
+    #[test]
+    fn 新字段名playlists直接读取() {
+        let state: PersistedState = serde_json::from_str(r#"{"playlists": {"摇滚": []}}"#).unwrap();
+        assert!(state.playlists.contains_key("摇滚"));
+    }
+
+    #[test]
+    fn 落盘用新字段名且可回读() {
+        let state = PersistedState {
+            playlists: BTreeMap::from([("摇滚".into(), Vec::new())]),
+            ..Default::default()
+        };
+        let text = serde_json::to_string(&state).unwrap();
+        assert!(text.contains("\"playlists\""));
+        assert!(!text.contains("\"named\""));
+        let round: PersistedState = serde_json::from_str(&text).unwrap();
+        assert!(round.playlists.contains_key("摇滚"));
     }
 }

@@ -21,7 +21,7 @@ pub fn socket_path() -> PathBuf {
         .join("rmus.sock")
 }
 
-/// 状态（命名队列等）目录。
+/// 状态（播放列表等）目录。
 pub fn state_dir() -> PathBuf {
     std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)

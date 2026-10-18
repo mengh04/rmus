@@ -104,19 +104,19 @@ pub enum Request {
     /// 调整队列顺序：把第 from 曲移到第 to 的位置（0 起，其余曲顺延）
     Move { from: usize, to: usize },
     QueueList,
-    /// 列出命名队列
+    /// 列出播放列表
     PlaylistsList,
-    /// 创建空命名队列
+    /// 创建空播放列表
     PlaylistNew { name: String },
-    /// 当前队列保存为命名队列（覆盖同名）
+    /// 当前队列保存为播放列表（覆盖同名）
     PlaylistSave { name: String },
-    /// 切换到命名队列并从头播放
+    /// 播放列表复制进队列并从头播放（之后互不影响）
     PlaylistPlay { name: String },
-    /// 添加文件/目录到命名队列（不存在则创建；即当前队列时同步生效）
+    /// 添加文件/目录到播放列表（不存在则创建；不影响正在播放的队列）
     PlaylistAdd { name: String, paths: Vec<PathBuf> },
-    /// 删除命名队列（正在播放的队列不可删）
+    /// 删除播放列表（不影响正在播放的队列）
     PlaylistRemove { name: String },
-    /// 重命名命名队列（正在播放时跟随改名；to 已存在则报错）
+    /// 重命名播放列表（队列来源标签跟随改名；to 已存在则报错）
     PlaylistRename { from: String, to: String },
     /// 循环模式：不设则循环切换 off -> all -> one -> off
     SetRepeat { mode: Option<RepeatMode> },
