@@ -2,7 +2,7 @@
 //!
 //! 输入行就是浮层标题：`/ 关键词`，光标交给终端画。
 
-use super::super::{app::SearchState, fmt_mmss};
+use super::super::{app::{SearchMode, SearchState}, fmt_mmss};
 use super::theme::Theme;
 use super::widgets::{POPUP_CHROME, empty_state, fit, input_line, key_hints, list_row_bg, popup};
 use ratatui::Frame;
@@ -24,7 +24,15 @@ pub fn draw(frame: &mut Frame, search: &SearchState, playing: Option<&std::path:
     }
 
     // ---- 标题行 = 输入行 --------------------------------------------------
-    let meta = if search.query.trim().is_empty() {
+    // normal 态字母键是动作，不收输入：光标移走，右侧标出模式
+    let normal = search.mode == SearchMode::Normal;
+    let meta = if normal {
+        if search.query.trim().is_empty() {
+            "NORMAL · i 输入".to_owned()
+        } else {
+            format!("{} 个结果 · NORMAL", search.results.len())
+        }
+    } else if search.query.trim().is_empty() {
         "输入关键词".to_owned()
     } else {
         format!("{} 个结果", search.results.len())
@@ -38,7 +46,9 @@ pub fn draw(frame: &mut Frame, search: &SearchState, playing: Option<&std::path:
         .saturating_sub(if room_for_meta { meta_w + 2 } else { 0 });
     let input = Rect::new(p.title.x + 2, p.title.y, input_w, 1);
     let (cx, cy) = input_line(frame, theme, input, "/", &search.query);
-    frame.set_cursor_position((cx, cy));
+    if !normal {
+        frame.set_cursor_position((cx, cy));
+    }
     if room_for_meta {
         let meta_area = Rect::new(p.title.right() - 2 - meta_w, p.title.y, meta_w, 1);
         frame.render_widget(
@@ -87,19 +97,27 @@ pub fn draw(frame: &mut Frame, search: &SearchState, playing: Option<&std::path:
         }
     }
 
-    // ---- 底部键位 ---------------------------------------------------------
+    // ---- 底部键位（随子模式切换） -----------------------------------------
     if !p.hint.is_empty() {
-        let hints = key_hints(
-            theme,
+        let items: &[(&str, &str)] = if normal {
+            &[
+                ("j/k", "移动"),
+                ("Enter", "插播"),
+                ("o", "下一首"),
+                ("a", "入队"),
+                ("gf", "定位"),
+                ("i", "输入"),
+            ]
+        } else {
             &[
                 ("Enter", "插播"),
                 ("C-o", "下一首"),
                 ("Tab", "入队"),
                 ("C-g", "定位"),
                 ("Esc", "关闭"),
-            ],
-            p.hint.width.saturating_sub(4),
-        );
+            ]
+        };
+        let hints = key_hints(theme, items, p.hint.width.saturating_sub(4));
         frame.render_widget(
             Paragraph::new(hints),
             Rect::new(p.hint.x + 3, p.hint.y, p.hint.width.saturating_sub(4), 1),

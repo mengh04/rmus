@@ -59,9 +59,12 @@ Run `rmus` with no subcommand to open the interactive player:
 - `d` removes the selected track, `D` / `x` remove the playing one, `C` clears, `S` shuffles
 - `c` renames the current queue (an anonymous queue gets its first name; a named one keeps its
   history under the new name)
-- In the search overlay: `Enter` jump-plays, `C-o` plays it after the current track, `Tab`
-  appends to the end of the queue without playing, `C-g` locates the track in the library view;
-  `C-u` clears the query and `C-w` deletes the last word
+- In the search overlay: `Esc` toggles between input and a vim-like normal mode. In normal mode
+  `j`/`k` move, `gg`/`G` jump, `Enter` jump-plays, `o` plays it after the current track, `a`
+  appends to the end of the queue, `gf` locates the track in the library view, `i` or `/` returns
+  to the query; in input mode the same actions live on `Enter` / `C-o` / `Tab` / `C-g`, with
+  `C-u` clearing the query and `C-w` deleting the last word
+- `[` / `]` seek 10 seconds back / forward
 - In the playlists view, `c` renames and `d` deletes the selected playlist
 
 While an overlay is open the terminal cursor moves into its input line; everywhere else it is hidden.

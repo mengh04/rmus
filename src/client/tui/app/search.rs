@@ -1,17 +1,44 @@
 //! 搜索面板（telescope 式）：边输入边向 daemon 查，回车插播。
 //!
-//! 键位贴 vim / telescope 的肌肉记忆——普通字母留给关键词输入，动作都在
-//! Ctrl / Enter / Tab 上：
-//! - 移动：`C-j/C-n` `C-k/C-p`（或方向键）；`Home/End` 跳到首/尾
-//! - `Enter` 立刻插播；`C-o` 插到当前曲之后（vim `o`：在下面开一行）
-//! - `Tab` 加到队列末尾；`C-g` 切到音乐库定位这首曲子（vim `gf` 打开文件）
-//! - `C-w` 删上一个词、`C-u` 清空关键词（vim 插入模式同款）
+//! 面板内分两个子模式，Esc 切换（再按 Esc 才关面板）：
+//! - 输入态（默认）：字母进关键词，动作在 Ctrl / Enter / Tab 上，
+//!   贴 telescope 的肌肉记忆——`C-j/C-k` `C-n/C-p` 移动、`C-o` 下一首、
+//!   `C-g` 音乐库定位、`C-w` 删词、`C-u` 清空。
+//! - normal 态：字母键让给动作，vim 直感——`j/k` 移动、`gg`/`G` 首/尾、
+//!   `Enter` 立刻插播、`o` 插到当前曲之后、`a` 加到队尾、`gf` 去音乐库
+//!   定位、`i` 或 `/` 回到输入。
 
 use super::state::parse_tracks;
-use super::{App, Mode, SearchState, Tab};
+use super::{App, Mode, SearchMode, SearchState, Tab};
 use crate::proto::{Request, StatusInfo, TrackInfo};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::{Path, PathBuf};
+
+/// 按键翻译出的意图。两个子模式各自负责翻译，执行统一走
+/// [`App::apply_search_intent`]（避开借用冲突，也避免动作写两遍）。
+enum Intent {
+    Keep,
+    Close,
+    /// 移动结果选中项
+    Select(i32),
+    /// 跳到第 index 个结果（usize::MAX = 最后一个）
+    SelectAbs(usize),
+    /// query 变了，重新过滤
+    Edit,
+    /// C-u：清空关键词
+    ClearQuery,
+    /// C-w：删掉最后一个词
+    DeleteWord,
+    /// normal -> 输入态（i / /）
+    ToInput,
+    Play(PathBuf),
+    /// 插到当前曲之后（不播）
+    PlayNext(TrackInfo),
+    /// 把选中结果加到队尾（不播）
+    Enqueue(TrackInfo),
+    /// 去音乐库视图定位这首曲子
+    Locate(PathBuf),
+}
 
 impl App {
     /// `/` 打开：空 query 起步，边输入边过滤。
@@ -20,6 +47,8 @@ impl App {
             query: String::new(),
             results: Vec::new(),
             selected: 0,
+            mode: SearchMode::Input,
+            pending_g: false,
         });
         self.mode = Mode::Search;
     }
@@ -36,43 +65,35 @@ impl App {
     }
 
     pub(super) fn handle_search_key(&mut self, key: KeyEvent) {
+        let intent = match self.search.as_ref().map_or(SearchMode::Input, |s| s.mode) {
+            SearchMode::Input => self.translate_search_input_key(key),
+            SearchMode::Normal => self.translate_search_normal_key(key),
+        };
+        self.apply_search_intent(intent);
+    }
+
+    /// 输入态：普通字母进 query，动作键与 telescope 一致，Esc 进 normal。
+    fn translate_search_input_key(&mut self, key: KeyEvent) -> Intent {
         use KeyModifiers as KM;
-        // 先把按键翻译成意图再执行，避开借用冲突
-        enum Intent {
-            Keep,
-            Close,
-            /// 移动结果选中项
-            Select(i32),
-            /// 跳到第 index 个结果（usize::MAX = 最后一个）
-            SelectAbs(usize),
-            /// query 变了，重新过滤
-            Edit,
-            /// C-u：清空关键词
-            ClearQuery,
-            /// C-w：删掉最后一个词
-            DeleteWord,
-            Play(PathBuf),
-            /// 插到当前曲之后（不播）
-            PlayNext(TrackInfo),
-            /// 把选中结果加到队尾（不播）
-            Enqueue(TrackInfo),
-            /// 去音乐库视图定位这首曲子
-            Locate(PathBuf),
-        }
-        let intent = match (key.modifiers, key.code) {
-            (KM::CONTROL, KeyCode::Char('c')) | (_, KeyCode::Esc) => Intent::Close,
+        match (key.modifiers, key.code) {
+            (KM::CONTROL, KeyCode::Char('c')) => Intent::Close,
+            (_, KeyCode::Esc) => {
+                if let Some(search) = &mut self.search {
+                    search.mode = SearchMode::Normal;
+                    search.pending_g = false;
+                }
+                Intent::Keep
+            }
             (_, KeyCode::Enter) => self
                 .selected_track()
                 .map_or(Intent::Keep, |t| Intent::Play(t.path)),
             // Tab：入队不播——"还想再听几首再轮到它"的加法
-            (_, KeyCode::Tab) => self
-                .selected_track()
-                .map_or(Intent::Keep, Intent::Enqueue),
+            (_, KeyCode::Tab) => self.selected_track().map_or(Intent::Keep, Intent::Enqueue),
             // C-o：插到当前曲之后，不打断正在播的（vim `o` 开新行的位置感）
             (KM::CONTROL, KeyCode::Char('o')) => self
                 .selected_track()
                 .map_or(Intent::Keep, Intent::PlayNext),
-            // C-g：切到音乐库把光标停到这首曲子上（vim `gf` 打开文件的联想）
+            // C-g：去音乐库定位（vim `gf` 打开文件的联想）
             (KM::CONTROL, KeyCode::Char('g')) => self
                 .selected_track()
                 .map_or(Intent::Keep, |t| Intent::Locate(t.path)),
@@ -106,7 +127,79 @@ impl App {
                 Intent::Edit
             }
             _ => Intent::Keep,
-        };
+        }
+    }
+
+    /// normal 态：字母键就是动作。`i` / `/` 回到输入。
+    fn translate_search_normal_key(&mut self, key: KeyEvent) -> Intent {
+        use KeyModifiers as KM;
+        // `g` 前缀：gg 跳顶 / gf 音乐库定位；其余键取消前缀照常处理
+        if self.search.as_ref().is_some_and(|s| s.pending_g) {
+            if let Some(search) = &mut self.search {
+                search.pending_g = false;
+            }
+            match (key.modifiers, key.code) {
+                (KM::NONE, KeyCode::Char('g')) => return Intent::SelectAbs(0),
+                (KM::NONE, KeyCode::Char('f')) => {
+                    return self
+                        .selected_track()
+                        .map_or(Intent::Keep, |t| Intent::Locate(t.path));
+                }
+                _ => {}
+            }
+        }
+        match (key.modifiers, key.code) {
+            (KM::CONTROL, KeyCode::Char('c')) | (_, KeyCode::Esc) => Intent::Close,
+            (KM::NONE, KeyCode::Char('i' | '/')) => Intent::ToInput,
+            // vim 上下移动
+            (KM::NONE, KeyCode::Char('j'))
+            | (KM::CONTROL, KeyCode::Char('j' | 'n'))
+            | (KM::NONE, KeyCode::Down) => Intent::Select(1),
+            (KM::NONE, KeyCode::Char('k'))
+            | (KM::CONTROL, KeyCode::Char('k' | 'p'))
+            | (KM::NONE, KeyCode::Up) => Intent::Select(-1),
+            (KM::NONE, KeyCode::Char('g')) => {
+                if let Some(search) = &mut self.search {
+                    search.pending_g = true;
+                }
+                Intent::Keep
+            }
+            (KM::SHIFT, KeyCode::Char('G')) | (KM::NONE, KeyCode::End) => {
+                Intent::SelectAbs(usize::MAX)
+            }
+            (KM::NONE, KeyCode::Home) => Intent::SelectAbs(0),
+            // Enter 立刻插播；o 插到当前曲之后；a / Tab 加到队尾
+            (_, KeyCode::Enter) => self
+                .selected_track()
+                .map_or(Intent::Keep, |t| Intent::Play(t.path)),
+            (KM::NONE, KeyCode::Char('o')) | (KM::CONTROL, KeyCode::Char('o')) => self
+                .selected_track()
+                .map_or(Intent::Keep, Intent::PlayNext),
+            (KM::NONE, KeyCode::Char('a')) | (_, KeyCode::Tab) => {
+                self.selected_track().map_or(Intent::Keep, Intent::Enqueue)
+            }
+            // C-g：去音乐库定位
+            (KM::CONTROL, KeyCode::Char('g')) => self
+                .selected_track()
+                .map_or(Intent::Keep, |t| Intent::Locate(t.path)),
+            // 编辑键顺手保留：清词 / 删词后回到输入态
+            (KM::CONTROL, KeyCode::Char('u')) => {
+                if let Some(search) = &mut self.search {
+                    search.query.clear();
+                }
+                Intent::ToInput
+            }
+            (KM::CONTROL, KeyCode::Char('w')) => {
+                if let Some(search) = &mut self.search {
+                    delete_word(&mut search.query);
+                }
+                Intent::ToInput
+            }
+            _ => Intent::Keep,
+        }
+    }
+
+    fn apply_search_intent(&mut self, intent: Intent) {
         match intent {
             Intent::Keep => {}
             Intent::Close => self.close_search(),
@@ -137,6 +230,12 @@ impl App {
                     delete_word(&mut search.query);
                 }
                 self.run_search();
+            }
+            Intent::ToInput => {
+                if let Some(search) = &mut self.search {
+                    search.mode = SearchMode::Input;
+                    search.pending_g = false;
+                }
             }
             Intent::Play(path) => self.play_library_track(&path),
             Intent::PlayNext(track) => {
@@ -199,7 +298,7 @@ impl App {
         self.notify(format!("插播 {title}"), false);
     }
 
-    /// C-o：插到当前曲之后（不播）。协议没有"按路径插队"，
+    /// 插到当前曲之后（不播）。协议没有"按路径插队"，
     /// 用 Add（落到队尾）+ Move（挪到当前曲后一位）组合实现。
     pub(super) fn play_next_in_queue(&mut self, path: &Path, title: &str) {
         let Ok(value) = self.daemon.request(Request::Status) else {
@@ -222,7 +321,7 @@ impl App {
         self.notify(format!("下一首播放：{title}"), false);
     }
 
-    /// C-g：切到音乐库视图，光标停到这首曲子上。
+    /// 切到音乐库视图，光标停到这首曲子上。
     pub(super) fn locate_in_library(&mut self, path: &Path) {
         // 现拉一次库列表（切视图本来也会刷新），拿到最新下标才能定位
         if let Ok(value) = self.daemon.request(Request::LibList) {
@@ -271,7 +370,7 @@ fn delete_word(query: &mut String) {
 
 #[cfg(test)]
 mod tests {
-    use super::delete_word;
+    use super::{SearchMode, delete_word};
 
     #[test]
     fn 删词_从末尾删一个词() {
@@ -292,5 +391,10 @@ mod tests {
         let mut empty = String::new();
         delete_word(&mut empty);
         assert_eq!(empty, "");
+    }
+
+    #[test]
+    fn 子模式_默认输入态() {
+        assert_eq!(SearchMode::default(), SearchMode::Input);
     }
 }

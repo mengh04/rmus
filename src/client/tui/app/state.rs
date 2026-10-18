@@ -69,11 +69,25 @@ pub enum Mode {
     Input(InputPurpose),
 }
 
+/// 搜索面板内的子模式：字母键要么进关键词，要么当动作（vim normal）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SearchMode {
+    /// 正在输入关键词（默认）
+    #[default]
+    Input,
+    /// vim normal：j/k 移动，o/a/gf… 直接触发动作，`i` 回输入
+    Normal,
+}
+
 /// 搜索面板状态；`None` = 未打开。与 [`Mode::Search`] 同生共死。
 pub struct SearchState {
     pub query: String,
     pub results: Vec<TrackInfo>,
     pub selected: usize,
+    /// 面板内子模式；Esc 在输入态进 normal，normal 态再 Esc 才关面板
+    pub mode: SearchMode,
+    /// normal 态按过 `g`：等 gg（跳顶）/ gf（音乐库定位）
+    pub pending_g: bool,
 }
 
 /// 在线 tab 状态：最近一次搜索的关键词与结果。

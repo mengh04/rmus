@@ -24,7 +24,7 @@ mod state;
 
 pub use state::{
     AsyncReply, CmdPalette, DownloadState, DownloadStatus, InputPurpose, Message, Mode,
-    OnlineSong, OnlineState, PluginInfo, SearchState, Tab,
+    OnlineSong, OnlineState, PluginInfo, SearchMode, SearchState, Tab,
 };
 
 use super::conn::{Daemon, Feed};

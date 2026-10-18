@@ -2,7 +2,7 @@
 //! 覆盖各尺寸分档、浮层、空态和消息条，防止布局改动把对齐弄坏。
 
 use super::draw;
-use crate::client::tui::app::{App, CmdPalette, Message, Mode, SearchState};
+use crate::client::tui::app::{App, CmdPalette, Message, Mode, SearchMode, SearchState};
 use crate::client::tui::conn::Daemon;
 use crate::proto::{PlayState, RepeatMode, StatusInfo, TrackInfo};
 use ratatui::Terminal;
@@ -92,9 +92,21 @@ fn 浮层都能渲染() {
         query: "晚".into(),
         results: vec![track(0, "晚风", "陈婧霏", "陈婧霏", 252_000)],
         selected: 0,
+        mode: SearchMode::Input,
+        pending_g: false,
     });
     let lines = render(&mut app, 100, 30);
     assert!(lines.iter().any(|l| l.contains('晚')), "搜索结果应出现");
+
+    // normal 子模式也要能渲染（字母键是动作，无光标）
+    if let Some(search) = &mut app.search {
+        search.mode = SearchMode::Normal;
+    }
+    let lines = render(&mut app, 100, 30);
+    assert!(lines.iter().any(|l| l.contains("NORMAL")), "normal 模式标示应出现");
+    if let Some(search) = &mut app.search {
+        search.mode = SearchMode::Input;
+    }
 
     app.mode = Mode::Command;
     app.palette = Some(CmdPalette {

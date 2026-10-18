@@ -52,6 +52,8 @@ pub enum Action {
     Back,
     /// 循环模式 off -> all -> one
     CycleRepeat,
+    /// 相对跳转（毫秒，负数快退）
+    Seek(i64),
     /// 随机播放开关
     ToggleRandom,
     VolumeUp,
@@ -67,6 +69,9 @@ pub enum Action {
     /// Esc：关闭帮助/搜索结果浮层
     Close,
 }
+
+/// `[` / `]` 每次快退 / 快进的步长。
+pub const SEEK_STEP_MS: i64 = 10_000;
 
 /// 按键 -> 动作。返回 None 表示该键未绑定（忽略）。
 pub fn resolve(key: KeyEvent) -> Option<Action> {
@@ -108,6 +113,8 @@ pub fn resolve(key: KeyEvent) -> Option<Action> {
             'z' => Some(ToggleRandom),
             '+' | '=' => Some(VolumeUp),
             '-' => Some(VolumeDown),
+            '[' => Some(Seek(-SEEK_STEP_MS)),
+            ']' => Some(Seek(SEEK_STEP_MS)),
             '/' => Some(Search),
             ':' => Some(Command),
             'w' => Some(SavePlaylist),
@@ -152,9 +159,10 @@ pub const HELP: &[(&str, &str)] = &[
     ("r", "循环模式 关→列表→单曲"),
     ("z", "随机播放开关"),
     ("+ / -", "音量加减"),
+    ("[ / ]", "快退 / 快进 10 秒"),
     ("/", "搜索：库（拼音/首字母）；在线视图搜在线"),
-    ("/ 面板内", "Enter 插播 · C-o 插到下一首 · Tab 入队 · C-g 音乐库定位"),
-    ("/ 面板内", "C-u 清空关键词 · C-w 删上一个词 · Home/End 首/尾"),
+    ("/ 面板内", "Esc 进 normal：j/k 移动 · o 下一首 · a 入队 · gf 定位"),
+    ("/ 面板内", "i 回输入 · gg/G 首/尾 · C-u 清空 · C-w 删词 · q 关"),
     (":", "命令面板（过滤，Tab 代入，↑↓ 历史）"),
     ("w", "当前队列存为播放列表"),
     ("B", "结束试听，恢复原队列"),

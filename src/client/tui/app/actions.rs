@@ -73,6 +73,7 @@ impl App {
             }
             Back => self.simple(Request::Back),
             CycleRepeat => self.simple(Request::SetRepeat { mode: None }),
+            Seek(delta) => self.simple(Request::SeekRelative { delta_ms: delta }),
             ToggleRandom => self.simple(Request::SetRandom { on: None }),
             VolumeUp => self.simple(Request::AdjustVolume { delta: 0.05 }),
             VolumeDown => self.simple(Request::AdjustVolume { delta: -0.05 }),
