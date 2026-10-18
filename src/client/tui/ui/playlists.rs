@@ -59,7 +59,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         let name = &app.playlists[i];
         let is_selected = i == selected;
         let playing = app.current_playlist.as_deref() == Some(name.as_str());
-        let is_visual = app.visual_range().is_some_and(|(a, b)| a <= i && i <= b);
+        let is_visual = app.visual_range().is_some_and(|(a, b)| a <= i && i <= b)
+            || app.playlist_marks.contains(name);
         let row_area = Rect::new(list.x, y, list.width, 1);
         list_row_bg_visual(frame.buffer_mut(), theme, row_area, is_selected, playing, is_visual);
 

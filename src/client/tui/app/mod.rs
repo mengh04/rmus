@@ -90,6 +90,11 @@ pub struct App {
     pending: Pending,
     /// visual 模式：v 进入，选段 = anchor..=当前光标，d/y/x 收割
     pub visual: Option<VisualSel>,
+    /// 间隔选段（ranger 式标记）：按路径记，队列挪动不失效。
+    /// 有标记时 d / y 直接收割标记。
+    pub queue_marks: std::collections::BTreeSet<std::path::PathBuf>,
+    pub library_marks: std::collections::BTreeSet<std::path::PathBuf>,
+    pub playlist_marks: std::collections::BTreeSet<String>,
     /// 未命名寄存器：yy 复制、dd / dj 等剪切进来的曲子（路径 + 标题），
     /// p / P 粘贴进队列。vim 的删除即剪切。
     register: Option<Vec<(std::path::PathBuf, String)>>,
@@ -164,6 +169,9 @@ impl App {
             history_draft: String::new(),
             pending: Pending::None,
             visual: None,
+            queue_marks: Default::default(),
+            library_marks: Default::default(),
+            playlist_marks: Default::default(),
             register: None,
             help_open: false,
             message: None,
@@ -239,6 +247,23 @@ impl App {
                         return;
                     }
                     // 其余键（j/k/gg/G/C-d/Enter…）走下面的普通路径
+                }
+                // 有标记时 d / y 直接收割标记（ranger 式间隔选段）
+                if self.pending == Pending::None
+                    && self.visual.is_none()
+                    && self.marks_active()
+                {
+                    match (key.modifiers, key.code) {
+                        (KeyModifiers::NONE, KeyCode::Char('d')) => {
+                            self.cut_marked();
+                            return;
+                        }
+                        (KeyModifiers::NONE, KeyCode::Char('y')) => {
+                            self.yank_marked();
+                            return;
+                        }
+                        _ => {}
+                    }
                 }
                 // operator-pending：gg gd gt gT / dd dj dk dG dgg / yy 的第二个键
                 if self.pending != Pending::None {

@@ -299,6 +299,151 @@ impl App {
         }
     }
 
+    /// m：标记 / 取消标记当前行（间隔选段，按路径记，挪队列不失效）。
+    pub(super) fn toggle_mark(&mut self) {
+        if self.visual.is_some() {
+            return;
+        }
+        match self.tab {
+            Tab::Queue => {
+                if let Some(t) = self.queue.get(self.queue_selected) {
+                    let path = t.path.clone();
+                    if !self.queue_marks.remove(&path) {
+                        self.queue_marks.insert(path);
+                    }
+                    self.notify_marked(self.queue_marks.len());
+                }
+            }
+            Tab::Library => {
+                if let Some(t) = self.library.get(self.library_selected) {
+                    let path = t.path.clone();
+                    if !self.library_marks.remove(&path) {
+                        self.library_marks.insert(path);
+                    }
+                    self.notify_marked(self.library_marks.len());
+                }
+            }
+            Tab::Playlists => {
+                if let Some(name) = self.playlists.get(self.playlists_selected) {
+                    let name = name.clone();
+                    if !self.playlist_marks.remove(&name) {
+                        self.playlist_marks.insert(name);
+                    }
+                    self.notify_marked(self.playlist_marks.len());
+                }
+            }
+            Tab::Online => {}
+        }
+    }
+
+    fn notify_marked(&mut self, n: usize) {
+        self.notify(format!("已标记 {n} 行（d 剪切 / y 复制 / M 清除）"), false);
+    }
+
+    /// M：清空当前视图的所有标记。
+    pub(super) fn clear_marks(&mut self) {
+        let had = self.marks_active();
+        match self.tab {
+            Tab::Queue => self.queue_marks.clear(),
+            Tab::Library => self.library_marks.clear(),
+            Tab::Playlists => self.playlist_marks.clear(),
+            Tab::Online => {}
+        }
+        if had {
+            self.notify("标记已清空", false);
+        }
+    }
+
+    /// 当前视图有没有标记（有则 d / y 收割标记而不是单行操作）。
+    pub(super) fn marks_active(&self) -> bool {
+        match self.tab {
+            Tab::Queue => !self.queue_marks.is_empty(),
+            Tab::Library => !self.library_marks.is_empty(),
+            Tab::Playlists => !self.playlist_marks.is_empty(),
+            Tab::Online => false,
+        }
+    }
+
+    /// d（有标记时）：剪切所有标记行。队列按连续段分组删，
+    /// 从高往低删避免下标失效；播放列表逐个删；音乐库不可删。
+    pub(super) fn cut_marked(&mut self) {
+        match self.tab {
+            Tab::Queue => {
+                let marks = self.queue_marks.clone();
+                let idxs: Vec<usize> = self
+                    .queue
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, t)| marks.contains(&t.path))
+                    .map(|(i, _)| i)
+                    .collect();
+                if idxs.is_empty() {
+                    self.notify("还没有标记（按 m 标记）", true);
+                    return;
+                }
+                self.register = Some(
+                    idxs.iter()
+                        .filter_map(|&i| self.queue.get(i))
+                        .map(|t| (t.path.clone(), t.title.clone()))
+                        .collect(),
+                );
+                // 连续下标合成一段，一段一次 RemoveRange（一段记一次撤销）
+                let mut runs: Vec<(usize, usize)> = Vec::new();
+                for &i in &idxs {
+                    match runs.last_mut() {
+                        Some((_, end)) if *end + 1 == i => *end = i,
+                        _ => runs.push((i, i)),
+                    }
+                }
+                let n = idxs.len();
+                for (start, end) in runs.into_iter().rev() {
+                    self.simple(Request::RemoveRange { start, end: end + 1 });
+                }
+                self.need_queue = true;
+                self.queue_marks.clear();
+                self.notify(format!("已剪切 {n} 首（p 粘贴）"), false);
+            }
+            Tab::Playlists => {
+                let names: Vec<String> = self.playlist_marks.iter().cloned().collect();
+                for name in &names {
+                    self.simple(Request::PlaylistRemove { name: name.clone() });
+                    self.notify(format!("已删除播放列表 “{name}”"), false);
+                }
+                self.need_playlists = true;
+                self.playlist_marks.clear();
+            }
+            Tab::Library => self.notify("音乐库不能删", true),
+            Tab::Online => {}
+        }
+    }
+
+    /// y（有标记时）：把标记行按列表顺序整段复制进寄存器。
+    /// 标记保留，可以继续补标再 y。
+    pub(super) fn yank_marked(&mut self) {
+        fn yank(
+            items: &[crate::proto::TrackInfo],
+            marks: &std::collections::BTreeSet<PathBuf>,
+        ) -> (usize, Vec<(PathBuf, String)>) {
+            let picked: Vec<_> = items
+                .iter()
+                .filter(|t| marks.contains(&t.path))
+                .map(|t| (t.path.clone(), t.title.clone()))
+                .collect();
+            (picked.len(), picked)
+        }
+        let (n, picked) = match self.tab {
+            Tab::Queue => yank(&self.queue, &self.queue_marks),
+            Tab::Library => yank(&self.library, &self.library_marks),
+            Tab::Playlists | Tab::Online => return,
+        };
+        if n == 0 {
+            self.notify("还没有标记（按 m 标记）", true);
+            return;
+        }
+        self.register = Some(picked);
+        self.notify(format!("已复制 {n} 首（p 粘贴）"), false);
+    }
+
     /// yy：把选中曲复制进未命名寄存器（队列 / 音乐库视图可用）。
     pub(super) fn yank_selected(&mut self) {
         let yanked = match self.tab {

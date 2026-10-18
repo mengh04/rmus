@@ -59,6 +59,8 @@ Run `rmus` with no subcommand to open the interactive player:
   `gt` / `gT` switch views (`2gt` jumps to view 2); digits `1-4` also switch views directly
 - `v` starts visual selection in the queue / library / playlists: `d` / `x` cut the selection,
   `y` yanks it, `o` swaps the selection ends, `Esc` / `v` leave visual mode
+- `m` marks the selected row for gapped multi-select (ranger-style); `d` / `y` harvest all marked
+  rows, `M` clears the marks — marks are keyed by path, so reordering doesn't break them
 - `dd` cuts the selected track (queue and playlists) into the register, nvim-style: `dj` / `dk` /
   `dG` / `dgg` cut down / up / to the end / to the top, all undoable in one step; `x` / `D` (remove
   the playing track) also fill the register

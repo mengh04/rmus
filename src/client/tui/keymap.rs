@@ -65,6 +65,10 @@ pub enum Action {
     PutAfter,
     /// 插到队列光标前（vim P）
     PutBefore,
+    /// 标记/取消标记选中行（间隔选段；有标记时 d / y 收割）
+    MarkToggle,
+    /// 清空当前视图的所有标记
+    MarkClear,
     /// 随机播放开关
     ToggleRandom,
     VolumeUp,
@@ -99,6 +103,7 @@ pub fn resolve(key: KeyEvent) -> Option<Action> {
         (KeyModifiers::SHIFT, KeyCode::Char(c)) => match c {
             // 大写字母键（SHIFT+char），vim 风格的"重动作"
             'G' => Some(Bottom),
+            'M' => Some(MarkClear),
             'B' => Some(Back),
             'D' => Some(RemoveCurrent),
             'C' => Some(ClearQueue),
@@ -136,6 +141,8 @@ pub fn resolve(key: KeyEvent) -> Option<Action> {
             '[' => Some(Seek(-SEEK_STEP_MS)),
             ']' => Some(Seek(SEEK_STEP_MS)),
             'u' => Some(Undo),
+            // ranger 式间隔标记：m 逐个标，d / y 收割
+            'm' => Some(MarkToggle),
             // vim p：put 到队列光标后
             'p' => Some(PutAfter),
             '/' => Some(Search),
@@ -177,6 +184,7 @@ pub const HELP: &[(&str, &str)] = &[
     ("dd", "剪切选中曲进寄存器（队列 / 播放列表）"),
     ("dj / dk / dG / dgg", "队列范围剪切：向下 / 向上 / 到底 / 到顶"),
     ("v", "visual 选段：d 剪切 / y 复制 / o 对调 / Esc 退出"),
+    ("m / M", "间隔标记当前行 · 清空标记（标记后 d/y 收割）"),
     ("D / x", "删除正在播放的曲"),
     ("d / Enter / x", "在线视图：下载 / 下载并试听 / 取消下载"),
     ("yy", "复制选中曲到寄存器（队列 / 音乐库）"),

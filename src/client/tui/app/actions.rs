@@ -89,6 +89,8 @@ impl App {
             }
             PutAfter => self.put_from_register(true),
             PutBefore => self.put_from_register(false),
+            MarkToggle => self.toggle_mark(),
+            MarkClear => self.clear_marks(),
             ToggleRandom => self.simple(Request::SetRandom { on: None }),
             VolumeUp => self.simple(Request::AdjustVolume { delta: 0.05 }),
             VolumeDown => self.simple(Request::AdjustVolume { delta: -0.05 }),

@@ -59,7 +59,9 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         let track = &app.queue[i];
         let playing = current == Some(track.index);
         let is_selected = i == selected;
-        let is_visual = app.visual_range().is_some_and(|(a, b)| a <= i && i <= b);
+        let is_visual =
+            app.visual_range().is_some_and(|(a, b)| a <= i && i <= b)
+                || app.queue_marks.contains(&track.path);
         let row_area = Rect::new(list.x, y, list.width, 1);
         list_row_bg_visual(frame.buffer_mut(), theme, row_area, is_selected, playing, is_visual);
         row::draw_row(frame, theme, cols, row_area, track, playing, is_selected);
