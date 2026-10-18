@@ -43,6 +43,8 @@ clap = { version = "4", features = ["derive"] }
 ratatui = "0.30"
 crossterm = "0.29"
 pinyin = "0.10"
+# 终端显示宽度：CJK 双宽字符的列对齐/截断（ratatui 内部同版本）
+unicode-width = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # MPRIS（D-Bus 媒体播放器接口，系统媒体控制/键盘媒体键/播放器小组件）

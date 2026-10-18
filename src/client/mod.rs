@@ -48,6 +48,12 @@ impl Client {
         }
     }
 
+    /// 测试/预览用：从一个已有的流建客户端（生产路径都走 [`Client::connect`]）。
+    #[cfg(test)]
+    pub(crate) fn from_stream(stream: UnixStream) -> Self {
+        Self::new(stream)
+    }
+
     fn new(stream: UnixStream) -> Self {
         let reader = BufReader::new(stream.try_clone().expect("clone unix stream"));
         Self {

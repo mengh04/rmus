@@ -2447,6 +2447,7 @@ dependencies = [
  "serde_json",
  "symphonia",
  "tokio",
+ "unicode-width",
  "url",
  "zbus",
 ]

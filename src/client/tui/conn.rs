@@ -61,6 +61,17 @@ impl Daemon {
         self.client.request(request)
     }
 
+    /// 测试/预览用：不连 daemon 的空壳，只为让 UI 能拿到状态。
+    #[cfg(test)]
+    pub fn detached() -> Self {
+        let (client_end, _server_end) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+        let (_tx, feed_rx) = channel();
+        Self {
+            client: Client::from_stream(client_end),
+            feed_rx,
+        }
+    }
+
     /// 主循环用：非阻塞地取走当前积压的所有推送。
     pub fn try_drain(&self) -> Vec<Feed> {
         let mut feeds = Vec::new();

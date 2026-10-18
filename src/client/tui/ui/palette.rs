@@ -1,108 +1,134 @@
-//! 命令面板浮层：telescope 风格，输入即过滤，选中代入，Enter 执行。
+//! 命令面板：`:` 打开，输入即过滤，Tab 补全，Enter 执行。
+//!
+//! 和搜索浮层共用同一套骨架：标题行就是输入行，中间是列表，底部是键位。
 
+use super::super::app::CmdPalette;
 use super::super::cmd;
-use crate::client::tui::app::CmdPalette;
+use super::theme::Theme;
+use super::widgets::{POPUP_CHROME, fit, input_line, key_hints, list_row_bg, popup};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::layout::{Alignment, Rect};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::Paragraph;
+use unicode_width::UnicodeWidthStr;
+
+const MAX_ROWS: u16 = 12;
+/// 命令名列宽（含别名，如 `pl / playlist`）。
+const NAME_W: u16 = 16;
 
 pub fn draw(frame: &mut Frame, palette: &CmdPalette) {
+    let theme = Theme::get();
     let filtered = cmd::filter(&palette.input);
-    let total = frame.area();
-    let err_extra = u16::from(palette.error.is_some());
-    // 提示行 1 + 错误行 ?1 + 命令若干 + 上下边框 2，最多 20 行
-    let height = (1 + err_extra + filtered.len() as u16 + 2)
-        .min(20)
-        .min(total.height);
-    let area = popup_area(total, 70, height);
-    frame.render_widget(Clear, area);
-
-    let block = Block::new()
-        .borders(Borders::ALL)
-        .title(Span::styled(" 命令面板 ", Style::default().bold()))
-        .title_bottom(
-            Line::from(Span::styled(
-                " C-j/C-k 选择  Tab 补全  ↑↓ 历史  Esc 关闭 ",
-                Style::default().add_modifier(Modifier::DIM),
-            ))
-            .alignment(ratatui::layout::Alignment::Center),
-        );
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let mut constraints = vec![Constraint::Length(1)];
-    if palette.error.is_some() {
-        constraints.push(Constraint::Length(1));
-    }
-    constraints.push(Constraint::Min(0));
-    let mut constraints = vec![Constraint::Length(1)];
-    if palette.error.is_some() {
-        constraints.push(Constraint::Length(1));
-    }
-    constraints.push(Constraint::Min(0));
-    let chunks = Layout::vertical(constraints).split(inner);
-    let prompt_area = chunks[0];
-    let error_area = palette.error.is_some().then_some(chunks[1]);
-    let list_area = chunks[chunks.len() - 1];
-
-    let prompt = Line::from(vec![
-        Span::styled(":", Style::default().fg(Color::Yellow).bold()),
-        Span::raw(palette.input.clone()),
-        Span::styled("▏", Style::default().add_modifier(Modifier::REVERSED)),
-    ]);
-    frame.render_widget(Paragraph::new(prompt), prompt_area);
-
-    if let (Some(error), Some(area)) = (&palette.error, error_area) {
-        let line = Paragraph::new(Line::styled(
-            format!(" {error}"),
-            Style::default().fg(Color::Red),
-        ));
-        frame.render_widget(line, area);
-    }
-
-    if filtered.is_empty() {
-        let empty = Paragraph::new(Line::styled(
-            " （无匹配命令）",
-            Style::default().add_modifier(Modifier::DIM),
-        ));
-        frame.render_widget(empty, list_area);
+    let rows = (filtered.len() as u16).clamp(1, MAX_ROWS);
+    let p = popup(frame, theme, 68, rows + POPUP_CHROME);
+    if p.title.is_empty() {
         return;
     }
 
-    let items: Vec<ListItem> = filtered
-        .iter()
-        .map(|spec| {
-            ListItem::new(Line::from(vec![
-                Span::raw(" "),
-                Span::styled(
-                    format!("{:<20}", spec.names.join(" / ")),
-                    Style::new().bold(),
-                ),
-                Span::styled(spec.desc.to_string(), Style::new().dim()),
-            ]))
-        })
-        .collect();
+    // ---- 标题行 = 输入行；右侧显示计数或错误 ------------------------------
+    let meta_style = if palette.error.is_some() {
+        theme.style_danger()
+    } else {
+        theme.style_faint()
+    };
+    let meta = match &palette.error {
+        Some(err) => err.clone(),
+        None => format!("{} 个命令", filtered.len()),
+    };
+    let meta_w = meta.width() as u16;
+    let room_for_meta = p.title.width > meta_w + 28;
+    let input_w = p
+        .title
+        .width
+        .saturating_sub(4)
+        .saturating_sub(if room_for_meta { meta_w + 2 } else { 0 });
+    let input = Rect::new(p.title.x + 2, p.title.y, input_w, 1);
+    let (cx, cy) = input_line(frame, theme, input, ":", &palette.input);
+    frame.set_cursor_position((cx, cy));
+    if room_for_meta {
+        let meta_area = Rect::new(p.title.right() - 2 - meta_w, p.title.y, meta_w, 1);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(fit(&meta, meta_w), meta_style)))
+                .alignment(Alignment::Right),
+            meta_area,
+        );
+    }
 
-    let selected = (palette.selected < filtered.len()).then_some(palette.selected);
-    let list = List::new(items)
-        .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
-        .highlight_symbol("» ");
-    frame.render_stateful_widget(
-        list,
-        list_area,
-        &mut ListState::default().with_selected(selected),
-    );
-}
+    // ---- 命令列表 ---------------------------------------------------------
+    if filtered.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "没有匹配的命令，试试 :help",
+                theme.style_muted(),
+            )))
+            .alignment(Alignment::Center),
+            Rect::new(p.body.x, p.body.y + p.body.height / 2, p.body.width, 1),
+        );
+    } else {
+        let height = p.body.height as usize;
+        let selected = palette.selected.min(filtered.len().saturating_sub(1));
+        let first = if selected >= height {
+            selected + 1 - height
+        } else {
+            0
+        };
+        for (row, i) in (first..filtered.len()).take(height).enumerate() {
+            let y = p.body.y + row as u16;
+            let spec = filtered[i];
+            let row_area = Rect::new(p.body.x, y, p.body.width, 1);
+            let is_selected = i == selected;
+            list_row_bg(
+                frame.buffer_mut(),
+                theme,
+                row_area,
+                is_selected,
+                is_selected,
+            );
 
-/// 居中、宽 `width_pct`%、高 `height` 行的浮层区域。
-fn popup_area(total: Rect, width_pct: u16, height: u16) -> Rect {
-    let [area] = Layout::vertical([Constraint::Length(height.min(total.height))])
-        .flex(ratatui::layout::Flex::Center)
-        .areas(total);
-    let [area] = Layout::horizontal([Constraint::Percentage(width_pct)])
-        .flex(ratatui::layout::Flex::Center)
-        .areas(area);
-    area
+            let name_w = NAME_W.min(p.body.width.saturating_sub(8).max(8));
+            let name_style = if is_selected {
+                Style::new().fg(theme.accent)
+            } else {
+                theme.style_text()
+            };
+            let names = spec.names.join(" / ");
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    fit(&names, name_w),
+                    name_style.add_modifier(ratatui::style::Modifier::BOLD),
+                ))),
+                Rect::new(p.body.x + 2, y, name_w, 1),
+            );
+            let desc_x = p.body.x + 2 + name_w + 2;
+            let desc_w = p.body.right().saturating_sub(2 + desc_x);
+            if desc_w > 0 {
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        fit(spec.desc, desc_w),
+                        theme.style_muted(),
+                    ))),
+                    Rect::new(desc_x, y, desc_w, 1),
+                );
+            }
+        }
+    }
+
+    // ---- 底部键位 ---------------------------------------------------------
+    if !p.hint.is_empty() {
+        let hints = key_hints(
+            theme,
+            &[
+                ("↑↓", "历史"),
+                ("Tab", "补全"),
+                ("Enter", "执行"),
+                ("Esc", "关闭"),
+            ],
+            p.hint.width.saturating_sub(4),
+        );
+        frame.render_widget(
+            Paragraph::new(hints),
+            Rect::new(p.hint.x + 3, p.hint.y, p.hint.width.saturating_sub(4), 1),
+        );
+    }
 }

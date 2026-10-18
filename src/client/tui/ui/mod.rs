@@ -1,130 +1,139 @@
 //! 渲染层：把 `App` 的状态画成一帧。这里不做任何 IO / 请求。
 //!
-//! 布局：
+//! 页面骨架（`draw` 只负责编排，具体绘制都在子模块）：
 //! ```text
-//! ┌ 正在播放 ──────────────────────────┐
-//! │ ▶ 曲名 - 艺术家                     │
-//! │ [██████████░░░░░░] 1:23 / 4:56     │
-//! │ 音量 65%  循环 列表  随机 关 ...     │
-//! ├────────────────────────────────────┤
-//! │  队列 │ 播放列表                    │
-//! │  ...列表主体...                     │
-//! ├────────────────────────────────────┤
-//! │ 提示 / 消息 / 输入行                │
-//! └────────────────────────────────────┘
+//!  rmus    1 队列 23   2 播放列表 4   · 深夜循环           播放中  循环 列表  音量 ▬▬▬ 70%
+//!
+//!  #  曲目                        艺术家          专辑          时长
+//!  ───────────────────────────────────────────────────────────────────────
+//!    1  晚风                        王菲            执迷不悔       4:12
+//!  ▌ 2  红豆                        王菲            唱游           4:36
+//!    3  流年                        王菲            王菲           4:40
+//!  ───────────────────────────────────────────────────────────────────────
+//!  红豆  王菲  唱游                                          2/23
+//!  01:23  ████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░      04:36
+//!   j/k 移动   Enter 播放   / 搜索   : 命令   ? 帮助       共 23 首 · 1:12:03
 //! ```
-//! 搜索面板与帮助是居中浮层。
+//!
+//! 子模块：
+//! - [`theme`] / [`widgets`]：调色板与共用零件（两者都有自己的子模块）
+//! - [`header`] / [`queue`] / [`playlists`] / [`now_playing`] / [`status`]：页面各区块
+//! - [`search`] / [`palette`] / [`help`]：浮层
+//! - [`list`]：列表视口的滚动窗口
+//!
+//! 缩放策略：窄了先丢次要列（专辑 → 艺术家），矮了先丢留白。
 
 mod header;
 mod help;
+mod list;
+mod now_playing;
 mod palette;
 mod playlists;
 mod queue;
 mod search;
+mod status;
+mod theme;
+mod widgets;
 
-use super::app::{App, Mode, Tab};
+#[cfg(test)]
+mod tests;
+
+use super::app::{App, Tab};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Tabs};
+use theme::Theme;
+use widgets::{canvas, rule};
+
+/// 页面左右留白：顶栏、内容、底栏共用，视觉上对齐成一条竖线。
+pub(super) const PAGE_MARGIN: u16 = 2;
+
+/// 一帧的纵向分区。
+struct Areas {
+    top_bar: Rect,
+    content: Rect,
+    divider: Rect,
+    now: Rect,
+    hints: Rect,
+}
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     app.tick(); // 顺手清掉过期的底部消息
 
-    let [header_area, tabs_area, body_area, status_area] = Layout::vertical([
-        Constraint::Length(5),
+    let theme = Theme::get();
+    canvas(frame, theme);
+    let area = frame.area();
+    if area.width < 16 || area.height < 8 {
+        return;
+    }
+
+    // 没在放东西时，底部整条让给列表（只留一行键位提示）
+    let has_track = app.status.as_ref().and_then(|s| s.track.as_ref()).is_some();
+    let areas = layout(area, has_track);
+
+    header::draw(frame, app, areas.top_bar);
+    match app.tab {
+        Tab::Queue => queue::draw(frame, app, page_inset(areas.content)),
+        Tab::Playlists => playlists::draw(frame, app, page_inset(areas.content)),
+    }
+
+    rule(frame, theme, page_inset(areas.divider));
+    now_playing::draw(frame, app, page_inset(areas.now));
+    status::draw(frame, app, theme, page_inset(areas.hints));
+
+    draw_overlays(frame, app);
+}
+
+/// 竖向分区：矮终端先砍顶栏上下留白，没歌时再砍底部留白。
+fn layout(area: Rect, has_track: bool) -> Areas {
+    let compact = area.height < 17;
+    let [_top_pad, top_bar, _gap, content, divider, now, hints] = Layout::vertical([
+        Constraint::Length(if compact { 0 } else { 1 }),
         Constraint::Length(1),
+        Constraint::Length(if compact { 0 } else { 1 }),
         Constraint::Min(3),
+        Constraint::Length(u16::from(has_track)),
+        Constraint::Length(if has_track {
+            if compact { 1 } else { 2 }
+        } else {
+            0
+        }),
         Constraint::Length(1),
     ])
-    .areas(frame.area());
+    .areas(area);
+    Areas {
+        top_bar,
+        content,
+        divider,
+        now,
+        hints,
+    }
+}
 
-    header::draw(frame, app, header_area);
-    draw_tabs(frame, app, tabs_area);
-    draw_body(frame, app, body_area);
-    draw_status_line(frame, app, status_area);
+/// 页面左右留白，所有内容都对齐到这条竖线。
+fn page_inset(area: Rect) -> Rect {
+    let margin = PAGE_MARGIN.min(area.width / 2);
+    Rect {
+        x: area.x + margin,
+        y: area.y,
+        width: area.width.saturating_sub(margin * 2),
+        height: area.height,
+    }
+}
 
-    // 浮层最后画（盖在主体上）
+/// 浮层最后画（盖在主体上）。
+fn draw_overlays(frame: &mut Frame, app: &mut App) {
+    let playing = app
+        .status
+        .as_ref()
+        .and_then(|s| s.track.as_ref())
+        .map(|t| t.path.as_path());
     if let Some(search) = &app.search {
-        search::draw(frame, search);
+        search::draw(frame, search, playing);
     }
     if let Some(palette) = &app.palette {
         palette::draw(frame, palette);
     }
     if app.help_open {
-        help::draw(frame);
+        help::draw(frame, &mut app.help_scroll);
     }
-}
-
-fn draw_tabs(frame: &mut Frame, app: &App, area: Rect) {
-    let titles: Vec<String> = Tab::ALL
-        .iter()
-        .enumerate()
-        .map(|(i, tab)| format!(" {} {} ", i + 1, tab.title()))
-        .collect();
-    let selected = Tab::ALL.iter().position(|t| *t == app.tab).unwrap_or(0);
-    let tabs = Tabs::new(titles)
-        .select(selected)
-        .highlight_style(Style::default().fg(ratatui::style::Color::Yellow).bold());
-    frame.render_widget(tabs, area);
-}
-
-fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
-    match app.tab {
-        Tab::Queue => queue::draw(frame, app, area),
-        Tab::Playlists => playlists::draw(frame, app, area),
-    }
-}
-
-/// 底部一行：输入命令行 > 临时消息 > 键位速览。
-fn draw_status_line(frame: &mut Frame, app: &App, area: Rect) {
-    let message_line = |app: &App| {
-        app.message
-            .as_ref()
-            .filter(|m| m.alive())
-            .map(|msg| {
-                let style = if msg.error {
-                    Style::default().fg(Color::Red)
-                } else {
-                    Style::default().fg(Color::Green)
-                };
-                Line::from(Span::styled(format!(" {}", msg.text), style))
-            })
-    };
-    let line = match app.mode {
-        Mode::Input(purpose) => Line::from(vec![
-            Span::styled(purpose.prefix(), Style::default().fg(Color::Yellow).bold()),
-            Span::raw(app.input_buffer()),
-            Span::styled("▏", Style::default().add_modifier(Modifier::REVERSED)),
-        ]),
-        // 搜索/命令面板自带输入行，底部只在有消息时显示
-        Mode::Search | Mode::Command => message_line(app).unwrap_or_else(|| Line::from("")),
-        Mode::Normal => message_line(app).unwrap_or_else(|| {
-            let peek = if app.status.as_ref().is_some_and(|s| s.peeking) {
-                "  B 恢复原队列"
-            } else {
-                ""
-            };
-            Line::from(Span::styled(
-                format!(
-                    " j/k 移动  空格 播放  n/p 切曲  / 搜索  w 存队列  Tab 切换  ? 帮助  q 退出{peek}"
-                ),
-                Style::default().add_modifier(Modifier::DIM),
-            ))
-        }),
-    };
-    frame.render_widget(line, area);
-}
-
-/// 带边框标题的公共块。
-pub(crate) fn block(title: &str) -> Block<'_> {
-    Block::new()
-        .borders(Borders::ALL)
-        .title(Span::styled(format!(" {title} "), Style::default().bold()))
-}
-
-/// 当前队列展示名（无名字的临时队列显示占位）。
-pub(crate) fn queue_label_from(status: &crate::proto::StatusInfo) -> String {
-    status.queue_name.clone().unwrap_or_else(|| "临时".into())
 }

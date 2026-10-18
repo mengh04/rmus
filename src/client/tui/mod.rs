@@ -28,6 +28,8 @@ pub fn run(socket: Option<PathBuf>, no_spawn: bool) -> Result<()> {
     let mut terminal = ratatui::init();
     let result = event_loop(&mut terminal, conn);
     ratatui::restore();
+    // 退出后窗口标题别再挂着歌名
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::SetTitle("rmus"));
     result
 }
 
@@ -38,6 +40,7 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, conn: conn::Daemon) -> Re
 
     let mut app = app::App::new(conn);
     app.startup();
+    let mut title: Option<String> = None;
 
     loop {
         // 键盘输入（100ms 轮询窗口，期间也能让出 CPU）
@@ -60,6 +63,22 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, conn: conn::Daemon) -> Re
         }
 
         terminal.draw(|frame| ui::draw(frame, &mut app))?;
+        sync_title(&mut title, &app);
+    }
+}
+
+/// 终端窗口标题跟随当前曲目：只在变化时写一次。
+fn sync_title(last: &mut Option<String>, app: &app::App) {
+    let want = match app.status.as_ref().and_then(|s| s.track.as_ref()) {
+        Some(track) if !track.artist.is_empty() => {
+            format!("{} · {} — rmus", track.title, track.artist)
+        }
+        Some(track) => format!("{} — rmus", track.title),
+        None => "rmus".to_owned(),
+    };
+    if last.as_deref() != Some(want.as_str()) {
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::SetTitle(&want));
+        *last = Some(want);
     }
 }
 
