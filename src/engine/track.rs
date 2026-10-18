@@ -16,6 +16,13 @@ impl Engine {
             None => 0,
         };
         let at = at.min(self.queue.items.len());
+        // 当前队列是命名队列：存档同步插入，保持两边一致
+        if let Some(name) = self.queue_name.clone()
+            && let Some(archived) = self.named.get_mut(&name)
+        {
+            let at = at.min(archived.len());
+            archived.insert(at, item.clone());
+        }
         self.queue.items.insert(at, item);
         self.dirty = true;
         self.emit(Event::QueueChanged);

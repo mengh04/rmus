@@ -131,9 +131,12 @@ impl Engine {
                 for i in (start..end).rev() {
                     self.queue.remove(i);
                 }
+                // 存档可能与队列有长度偏差（历史版本的 Add/插播只进队列），
+                // 越界 drain 会 panic 并杀死引擎线程 -> 整个 daemon 无响应
                 if let Some(name) = self.queue_name.clone()
                     && let Some(items) = self.named.get_mut(&name)
                 {
+                    let (start, end) = clamp_drain(start, end, items.len());
                     items.drain(start..end);
                 }
                 self.dirty = true;
@@ -303,5 +306,34 @@ impl Engine {
                 Err("内部错误：库请求未在 daemon 层处理".into())
             }
         }
+    }
+}
+
+/// 把删除范围夹进给定长度（起点不得超过终点，两端都不得超过 len）。
+/// 返回 (start, end)；完全越界的范围夹成 (len, len)，drain 成空操作。
+fn clamp_drain(start: usize, end: usize, len: usize) -> (usize, usize) {
+    let start = start.min(len);
+    (start, end.max(start).min(len))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clamp_drain;
+
+    #[test]
+    fn 范围在界内保持不变() {
+        assert_eq!(clamp_drain(0, 3, 5), (0, 3));
+        assert_eq!(clamp_drain(2, 5, 5), (2, 5));
+    }
+
+    #[test]
+    fn 越界部分被夹掉() {
+        assert_eq!(clamp_drain(3, 7, 5), (3, 5));
+    }
+
+    #[test]
+    fn 完全越界夹成空段() {
+        assert_eq!(clamp_drain(5, 6, 5), (5, 5));
+        assert_eq!(clamp_drain(7, 9, 5), (5, 5));
     }
 }

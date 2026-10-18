@@ -28,6 +28,13 @@ impl Engine {
                         self.push_history();
                     }
                     let added = items.len();
+                    // 当前队列是命名队列：存档同步追加，与 Remove/Move/Undo
+                    // 的同步行为保持一致（失步会让 RemoveRange 越界）
+                    if let Some(name) = self.queue_name.clone()
+                        && let Some(archived) = self.named.get_mut(&name)
+                    {
+                        archived.extend(items.iter().cloned());
+                    }
                     self.queue.items.extend(items);
                     self.dirty = true;
                     self.emit(Event::QueueChanged);
