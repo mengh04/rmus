@@ -21,6 +21,7 @@ pub enum Feed {
 pub struct Daemon {
     client: Client,
     feed_rx: Receiver<Feed>,
+    socket: Option<PathBuf>,
 }
 
 impl Daemon {
@@ -32,7 +33,7 @@ impl Daemon {
             Client::connect_or_spawn(socket.clone())?
         };
         // 主连接已保证 daemon 在跑，事件连接直接连即可
-        let mut events_client = Client::connect(socket)?;
+        let mut events_client = Client::connect(socket.clone())?;
 
         let (tx, feed_rx) = channel();
         std::thread::Builder::new()
@@ -53,12 +54,35 @@ impl Daemon {
                 }
             })?;
 
-        Ok(Self { client, feed_rx })
+        Ok(Self {
+            client,
+            feed_rx,
+            socket,
+        })
     }
 
     /// 发请求并返回 daemon 的 `result` 字段。
     pub fn request(&mut self, request: crate::proto::Request) -> Result<serde_json::Value> {
         self.client.request(request)
+    }
+
+    /// 后台线程里发请求（慢调用不阻塞主循环；一条连接一次请求）。
+    /// 返回该线程的回执通道。
+    pub fn spawn_request(
+        &self,
+        request: crate::proto::Request,
+    ) -> Receiver<anyhow::Result<serde_json::Value>> {
+        let (tx, rx) = channel();
+        let socket = self.socket.clone();
+        std::thread::Builder::new()
+            .name("rmus-async".into())
+            .spawn(move || {
+                let result =
+                    Client::connect(socket).and_then(|mut client| client.request(request));
+                let _ = tx.send(result);
+            })
+            .expect("启动后台请求线程");
+        rx
     }
 
     /// 测试/预览用：不连 daemon 的空壳，只为让 UI 能拿到状态。
@@ -69,6 +93,7 @@ impl Daemon {
         Self {
             client: Client::from_stream(client_end),
             feed_rx,
+            socket: None,
         }
     }
 

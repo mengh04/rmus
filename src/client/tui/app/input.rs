@@ -95,6 +95,9 @@ impl App {
                 self.need_playlists = true;
                 self.notify(format!("“{from}” 已重命名为 “{to}”"), false);
             }
+            InputPurpose::OnlineSearch => {
+                self.run_online_search(text);
+            }
         }
     }
 }

@@ -56,6 +56,7 @@ fn left_line(app: &App, theme: &Theme, width: u16) -> Line<'static> {
             Tab::Queue => app.queue.len(),
             Tab::Library => app.library.len(),
             Tab::Playlists => app.playlists.len(),
+            Tab::Online => app.online.as_ref().map_or(0, |o| o.songs.len()),
         };
         let label = format!(" {} {} {} ", i + 1, tab.title(), count);
         let w = label.width() as u16;

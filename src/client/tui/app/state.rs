@@ -1,6 +1,7 @@
 //! `App` 持有的界面状态类型：视图、模式、浮层、消息。
 
 use crate::proto::TrackInfo;
+use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
 /// 主界面视图。拓展：加变体 + 改 `Tab::ALL` / `title` 即可。
@@ -9,16 +10,19 @@ pub enum Tab {
     Queue,
     Library,
     Playlists,
+    /// 插件提供的在线搜索 / 下载（rmus-dl）
+    Online,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 3] = [Tab::Queue, Tab::Library, Tab::Playlists];
+    pub const ALL: [Tab; 4] = [Tab::Queue, Tab::Library, Tab::Playlists, Tab::Online];
 
     pub fn title(self) -> &'static str {
         match self {
             Tab::Queue => "队列",
             Tab::Library => "音乐库",
             Tab::Playlists => "播放列表",
+            Tab::Online => "在线",
         }
     }
 
@@ -40,6 +44,8 @@ pub enum InputPurpose {
     SavePlaylist,
     /// 重命名播放列表（携带旧名，确认时发 PlaylistRename）
     RenamePlaylist(String),
+    /// 在线搜索关键词（确认时走插件的 search）
+    OnlineSearch,
 }
 
 impl InputPurpose {
@@ -48,6 +54,7 @@ impl InputPurpose {
         match self {
             InputPurpose::SavePlaylist => ":w ",
             InputPurpose::RenamePlaylist(_) => ":rename ",
+            InputPurpose::OnlineSearch => "/ ",
         }
     }
 }
@@ -67,6 +74,76 @@ pub struct SearchState {
     pub query: String,
     pub results: Vec<TrackInfo>,
     pub selected: usize,
+}
+
+/// 在线 tab 状态：最近一次搜索的关键词与结果。
+#[derive(Debug, Default)]
+pub struct OnlineState {
+    pub query: String,
+    pub songs: Vec<OnlineSong>,
+    pub selected: usize,
+}
+
+/// 一条在线搜索结果；字段形状即插件协议的 `song` 对象（下载时原样回传）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnlineSong {
+    pub title: String,
+    #[serde(default)]
+    pub artist: String,
+    #[serde(default)]
+    pub album: String,
+    /// 来源标识（如 kuwo / kugou），插件回源用
+    pub source: String,
+    /// 源内唯一标识
+    pub song_id: String,
+    #[serde(default)]
+    pub duration_ms: u64,
+}
+
+/// 已发现插件的信息（`plugin list`）。methods 形状即协议的
+/// `[{name,kind}]`，直接复用契约类型。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginInfo {
+    pub name: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub methods: Vec<crate::plugin::PluginMethod>,
+}
+
+impl PluginInfo {
+    /// 在线 tab 约定：插件要同时提供 search 与 download。
+    pub fn supports_online(&self) -> bool {
+        let names: Vec<&str> = self.methods.iter().map(|m| m.name.as_str()).collect();
+        names.contains(&"search") && names.contains(&"download")
+    }
+}
+
+/// 一次下载在界面上的踪迹（按 daemon 分配的任务号 call 索引）。
+#[derive(Debug)]
+pub struct DownloadState {
+    pub song: OnlineSong,
+    pub received: u64,
+    pub total: Option<u64>,
+    pub status: DownloadStatus,
+    /// 完成后自动试听（Peek）
+    pub peek: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DownloadStatus {
+    Running,
+    Done,
+    Failed(String),
+}
+
+/// 后台线程回来的异步回复（同步 Client 不能在主线程久等，搜索走这边）。
+pub enum AsyncReply {
+    OnlineSearch {
+        generation: u64,
+        query: String,
+        result: anyhow::Result<serde_json::Value>,
+    },
 }
 
 /// `:` 命令面板状态；`None` = 未打开。与 [`Mode::Command`] 同生共死。

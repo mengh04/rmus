@@ -125,6 +125,17 @@ pub enum Request {
     LibList,
     /// 全量重建库索引（~/Music；daemon 层扫描）
     LibRescan,
+    /// 列出已发现的插件（daemon 层处理，不进引擎）
+    PluginList,
+    /// 调用插件方法。短调用等插件响应（超时 30s）；长任务立即返回
+    /// `{"call":N}`，进度/结果经 `Event::Plugin` 推送（daemon 层处理）
+    PluginCall {
+        plugin: String,
+        method: String,
+        params: serde_json::Value,
+    },
+    /// 取消插件长任务（daemon 层处理）
+    PluginCancel { plugin: String, call: u64 },
     /// 请求 daemon 退出（daemon 层处理，不进引擎）
     Quit,
 }
@@ -142,6 +153,8 @@ pub enum Reply {
     },
     /// 库搜索候选（按相关度降序）
     Matches { tracks: Vec<TrackInfo> },
+    /// 插件调用的原样结果（透明透传，不做包装）
+    Plugin(serde_json::Value),
     Ok,
 }
 
@@ -156,6 +169,15 @@ pub enum Event {
     QueueChanged,
     VolumeChanged { value: f32 },
     ModeChanged { repeat: RepeatMode, random: bool },
+    /// 插件推送（进度等）与长任务完成通知的统一出口。
+    /// `data` 的形状由插件自定：进度类形如 `{"received":N,"total":M}`，
+    /// 宿主包装的任务完结为 `{"event":"done","result":{...}}` 或
+    /// `{"event":"failed","error":"..."}`。
+    Plugin {
+        plugin: String,
+        call: Option<u64>,
+        data: serde_json::Value,
+    },
 }
 
 /// 客户端 -> 服务端的单行请求。
@@ -189,6 +211,11 @@ mod tests {
             Event::StateChanged { state: PlayState::Playing },
             Event::VolumeChanged { value: 0.5 },
             Event::ModeChanged { repeat: RepeatMode::All, random: true },
+            Event::Plugin {
+                plugin: "dl".into(),
+                call: Some(3),
+                data: serde_json::json!({"received": 1, "total": 2}),
+            },
         ];
         for ev in events {
             let text = serde_json::to_string(&ev).expect("序列化");
@@ -208,5 +235,28 @@ mod tests {
         assert_eq!(method(&Request::Move { from: 0, to: 1 }), "move");
         assert_eq!(method(&Request::PlaylistRename { from: "a".into(), to: "b".into() }), "playlist_rename");
         assert_eq!(method(&Request::LibList), "lib_list");
+        assert_eq!(method(&Request::PluginList), "plugin_list");
+        assert_eq!(
+            method(&Request::PluginCall {
+                plugin: "dl".into(),
+                method: "search".into(),
+                params: serde_json::json!({"query": "x"}),
+            }),
+            "plugin_call"
+        );
+        assert_eq!(
+            method(&Request::PluginCancel { plugin: "dl".into(), call: 3 }),
+            "plugin_cancel"
+        );
+    }
+
+    /// Reply::Plugin 是透明透传：序列化后就是插件 JSON 本身。
+    #[test]
+    fn reply_plugin_透传() {
+        let value = serde_json::json!({"songs": [1, 2]});
+        let msg = ServerMsg::Reply { id: 1, result: Reply::Plugin(value.clone()) };
+        let text = serde_json::to_string(&msg).unwrap();
+        let back: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.get("result"), Some(&value));
     }
 }

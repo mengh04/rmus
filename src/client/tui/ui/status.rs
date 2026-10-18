@@ -81,10 +81,19 @@ fn keys_for(tab: Tab) -> &'static [(&'static str, &'static str)] {
             (":", "命令"),
             ("?", "帮助"),
         ],
+        Tab::Online => &[
+            ("/", "搜索"),
+            ("j/k", "移动"),
+            ("d", "下载"),
+            ("Enter", "下载+试听"),
+            ("x", "取消"),
+            ("?", "帮助"),
+        ],
     }
 }
 
-/// 右下角统计：队列/音乐库报曲目数和总时长，播放列表报个数。
+/// 右下角统计：队列/音乐库报曲目数和总时长，播放列表报个数，
+/// 在线视图报搜索结果数与在途下载。
 fn stats_line(app: &App) -> String {
     match app.tab {
         Tab::Queue | Tab::Library => {
@@ -104,6 +113,20 @@ fn stats_line(app: &App) -> String {
                 String::new()
             } else {
                 format!("{count} 个播放列表")
+            }
+        }
+        Tab::Online => {
+            use super::super::app::DownloadStatus;
+            let running = app
+                .downloads
+                .values()
+                .filter(|d| d.status == DownloadStatus::Running)
+                .count();
+            match (app.online.as_ref().map(|o| o.songs.len()).unwrap_or(0), running) {
+                (0, 0) => String::new(),
+                (results, 0) => format!("{results} 个结果"),
+                (0, _) => format!("下载中 {running}"),
+                (results, _) => format!("{results} 个结果 · 下载中 {running}"),
             }
         }
     }

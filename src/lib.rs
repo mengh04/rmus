@@ -7,6 +7,7 @@
 pub mod client;
 pub mod engine;
 pub mod library;
+pub mod plugin;
 pub mod proto;
 pub mod scan;
 

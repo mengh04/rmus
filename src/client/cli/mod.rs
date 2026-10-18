@@ -14,6 +14,7 @@ use format::{
 };
 use playlist::handle_pl;
 use rmus::proto::{Request, TrackInfo};
+use serde_json::json;
 
 /// 入口：先规整路径，再按子命令分发；无子命令时进 TUI。
 pub(crate) fn run(mut cli: Cli) -> Result<()> {
@@ -89,6 +90,7 @@ pub(crate) fn run(mut cli: Cli) -> Result<()> {
                 );
             }
         }
+        Command::Dl { query, get } => handle_dl(&mut client, &query.join(" "), get.as_deref())?,
         Command::Pause => {
             print_status(&status_reply(client.request(Request::Pause)?)?);
         }
@@ -188,9 +190,92 @@ pub(crate) fn run(mut cli: Cli) -> Result<()> {
     Ok(())
 }
 
+/// `rmus dl`：在线搜索 / 下载。挑第一个提供 search+download 的插件。
+fn handle_dl(
+    client: &mut rmus::client::Client,
+    query: &str,
+    get: Option<&str>,
+) -> Result<()> {
+    if query.is_empty() {
+        bail!("用法：rmus dl <关键词> [-g 1,3]");
+    }
+    let value = client.request(Request::PluginList)?;
+    let plugins: Vec<serde_json::Value> = value
+        .get("plugins")
+        .cloned()
+        .unwrap_or_default()
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let usable = plugins.iter().find(|p| {
+        let methods = p.get("methods").and_then(|m| m.as_array()).cloned().unwrap_or_default();
+        methods.iter().any(|m| m.get("name").and_then(|n| n.as_str()) == Some("search"))
+            && methods.iter().any(|m| m.get("name").and_then(|n| n.as_str()) == Some("download"))
+    });
+    let Some(plugin) = usable.and_then(|p| p.get("name").and_then(|n| n.as_str()).map(String::from))
+    else {
+        bail!("未发现可用的在线搜索插件（把 rmus-dl 装入插件目录后重启 rmusd）");
+    };
+
+    let value = client.request(Request::PluginCall {
+        plugin: plugin.clone(),
+        method: "search".into(),
+        params: json!({"query": query}),
+    })?;
+    let songs = value
+        .get("songs")
+        .cloned()
+        .unwrap_or_default()
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    if songs.is_empty() {
+        println!("没有匹配 “{query}” 的结果");
+        return Ok(());
+    }
+    for (i, song) in songs.iter().enumerate() {
+        let title = song.get("title").and_then(|v| v.as_str()).unwrap_or("");
+        let artist = song.get("artist").and_then(|v| v.as_str()).unwrap_or("");
+        let album = song.get("album").and_then(|v| v.as_str()).unwrap_or("");
+        let source = song.get("source").and_then(|v| v.as_str()).unwrap_or("?");
+        let duration = song
+            .get("duration_ms")
+            .and_then(|v| v.as_u64())
+            .filter(|ms| *ms > 0)
+            .map(fmt_mmss)
+            .unwrap_or_else(|| "--:--".into());
+        println!(
+            "{:>3}. [{source}] {title} - {artist}  {album}  {duration}",
+            i + 1
+        );
+    }
+
+    let Some(get) = get else {
+        println!("（加 -g 序号 下载，如 -g 1,3；产物自动进入 ~/Music）");
+        return Ok(());
+    };
+    for index in get.split(',') {
+        let Ok(index) = index.trim().parse::<usize>() else {
+            bail!("序号应为数字：{get}");
+        };
+        if index == 0 || index > songs.len() {
+            bail!("序号 {index} 超出范围（1-{}）", songs.len());
+        }
+        let song = &songs[index - 1];
+        let title = song.get("title").and_then(|v| v.as_str()).unwrap_or("");
+        let value = client.request(Request::PluginCall {
+            plugin: plugin.clone(),
+            method: "download".into(),
+            params: json!({"song": song}),
+        })?;
+        let call = value.get("call").and_then(|v| v.as_u64()).unwrap_or(0);
+        println!("任务 #{call} 已提交：“{title}”（rmusd 后台下载，完成后自动入库）");
+    }
+    Ok(())
+}
+
 /// 相对路径转绝对路径（以客户端 CWD 解释），不解析符号链接。
-fn normalize(cli: &mut Cli) {
-    cli.paths = absolutize(&cli.paths);
+fn normalize(cli: &mut Cli) {    cli.paths = absolutize(&cli.paths);
     if let Some(Command::Add { paths }) = cli.command.as_mut() {
         *paths = absolutize(paths);
     }

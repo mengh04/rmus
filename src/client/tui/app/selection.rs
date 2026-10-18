@@ -10,6 +10,7 @@ impl App {
             Tab::Queue => self.queue.len(),
             Tab::Library => self.library.len(),
             Tab::Playlists => self.playlists.len(),
+            Tab::Online => self.online.as_ref().map_or(0, |o| o.songs.len()),
         }
     }
 
@@ -22,6 +23,7 @@ impl App {
             Tab::Queue => self.queue_selected,
             Tab::Library => self.library_selected,
             Tab::Playlists => self.playlists_selected,
+            Tab::Online => self.online.as_ref().map_or(0, |o| o.selected),
         };
         let next = (base as i32 + delta).clamp(0, len as i32 - 1) as usize;
         self.set_selection(next);
@@ -34,6 +36,11 @@ impl App {
             Tab::Queue => self.queue_selected = index,
             Tab::Library => self.library_selected = index,
             Tab::Playlists => self.playlists_selected = index,
+            Tab::Online => {
+                if let Some(online) = &mut self.online {
+                    online.selected = index;
+                }
+            }
         }
     }
 
@@ -59,6 +66,8 @@ impl App {
                     self.need_queue = true;
                 }
             }
+            // 在线视图：下载选中曲目，完成后自动试听
+            Tab::Online => self.download_selected(true),
         }
     }
 
@@ -82,6 +91,7 @@ impl App {
                 self.notify(format!("已删除播放列表 “{name}”"), false);
             }
             Tab::Library => {}
+            Tab::Online => {}
         }
     }
 
@@ -132,6 +142,9 @@ impl App {
         clamp(&mut self.queue_selected, self.queue.len());
         clamp(&mut self.library_selected, self.library.len());
         clamp(&mut self.playlists_selected, self.playlists.len());
+        if let Some(online) = &mut self.online {
+            clamp(&mut online.selected, online.songs.len());
+        }
     }
 
     /// 队列第一次到手时，把光标停在正在播放的那首上。

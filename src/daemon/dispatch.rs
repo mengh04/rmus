@@ -1,6 +1,7 @@
 //! 请求分发：库查询就地回、扫描丢阻塞线程池、其余转交引擎。
 
 use crate::Library;
+use crate::plugin_host::PluginHost;
 use crate::reply::{error_reply, send_reply};
 use rmus::engine::ToEngine;
 use rmus::library;
@@ -14,8 +15,60 @@ pub(crate) async fn dispatch(
     cmd_tx: &std_mpsc::Sender<ToEngine>,
     out_tx: &mpsc::UnboundedSender<String>,
     library: &Library,
+    plugins: &PluginHost,
 ) {
     let id = msg.id;
+
+    // 插件调用：宿主层就地处理（不进引擎）。长任务立即回任务号，
+    // 进度/结果走 Event::Plugin 广播。
+    if let Request::PluginCall {
+        plugin,
+        method,
+        params,
+    } = msg.request
+    {
+        let host = plugins.clone();
+        let out_tx = out_tx.clone();
+        tokio::spawn(async move {
+            let json = match host.call(&plugin, &method, params).await {
+                Ok(value) => serde_json::to_string(&ServerMsg::Reply {
+                    id,
+                    result: Reply::Plugin(value),
+                })
+                .unwrap_or_default(),
+                Err(error) => serde_json::to_string(&error_reply(id, error)).unwrap_or_default(),
+            };
+            let _ = out_tx.send(json);
+        });
+        return;
+    }
+
+    if let Request::PluginCancel { plugin, call } = msg.request {
+        let host = plugins.clone();
+        let out_tx = out_tx.clone();
+        tokio::spawn(async move {
+            let json = match host.cancel(&plugin, call).await {
+                Ok(value) => serde_json::to_string(&ServerMsg::Reply {
+                    id,
+                    result: Reply::Plugin(value),
+                })
+                .unwrap_or_default(),
+                Err(error) => serde_json::to_string(&error_reply(id, error)).unwrap_or_default(),
+            };
+            let _ = out_tx.send(json);
+        });
+        return;
+    }
+
+    if matches!(msg.request, Request::PluginList) {
+        let json = serde_json::to_string(&ServerMsg::Reply {
+            id,
+            result: Reply::Plugin(plugins.list()),
+        })
+        .unwrap_or_default();
+        let _ = out_tx.send(json);
+        return;
+    }
 
     // 库模糊搜索：查索引直接回（不进引擎）
     if let Request::Find { query } = msg.request {
@@ -185,8 +238,10 @@ pub(crate) async fn dispatch(
 
     if matches!(msg.request, Request::Quit) {
         // 先删 socket：立即让后续连接失败，避免竞态（新客户端连上将死的
-        // daemon / 新 daemon 误判"已在运行"）；再等响应写出后退出
+        // daemon / 新 daemon 误判"已在运行"）；顺手终止插件子进程；
+        // 再等响应写出后退出
         let _ = std::fs::remove_file(rmus::socket_path());
+        plugins.shutdown();
         if let Ok(json) = serde_json::to_string(&ServerMsg::Reply {
             id,
             result: rmus::proto::Reply::Ok,

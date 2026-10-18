@@ -28,6 +28,7 @@ mod help;
 mod library;
 mod list;
 mod now_playing;
+mod online;
 mod palette;
 mod playlists;
 mod queue;
@@ -76,6 +77,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Tab::Queue => queue::draw(frame, app, page_inset(areas.content)),
         Tab::Library => library::draw(frame, app, page_inset(areas.content)),
         Tab::Playlists => playlists::draw(frame, app, page_inset(areas.content)),
+        Tab::Online => online::draw(frame, app, page_inset(areas.content)),
     }
 
     rule(frame, theme, page_inset(areas.divider));

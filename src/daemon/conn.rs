@@ -2,6 +2,7 @@
 
 use crate::Library;
 use crate::dispatch::dispatch;
+use crate::plugin_host::PluginHost;
 use crate::reply::error_reply;
 use rmus::engine::ToEngine;
 use rmus::proto::{RequestMsg, ServerMsg};
@@ -15,6 +16,7 @@ pub(crate) async fn handle_conn(
     cmd_tx: std_mpsc::Sender<ToEngine>,
     mut events: broadcast::Receiver<rmus::proto::Event>,
     library: Library,
+    plugins: PluginHost,
 ) {
     let (read_half, write_half) = stream.into_split();
 
@@ -70,7 +72,7 @@ pub(crate) async fn handle_conn(
                 continue;
             }
         };
-        dispatch(msg, &cmd_tx, &out_tx, &library).await;
+        dispatch(msg, &cmd_tx, &out_tx, &library, &plugins).await;
     }
 
     drop(out_tx);

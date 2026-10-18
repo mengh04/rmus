@@ -16,18 +16,24 @@
 mod actions;
 mod command;
 mod input;
+mod online;
 mod palette;
 mod search;
 mod selection;
 mod state;
 
-pub use state::{CmdPalette, InputPurpose, Message, Mode, SearchState, Tab};
+pub use state::{
+    AsyncReply, CmdPalette, DownloadState, DownloadStatus, InputPurpose, Message, Mode,
+    OnlineSong, OnlineState, PluginInfo, SearchState, Tab,
+};
 
 use super::conn::{Daemon, Feed};
 use super::keymap;
 use crate::proto::{Event, RepeatMode, Request, StatusInfo, TrackInfo};
 use crossterm::event::{KeyCode, KeyModifiers};
 use state::parse_tracks;
+use std::collections::HashMap;
+use std::sync::mpsc::{Sender, channel};
 
 pub struct App {
     pub daemon: Daemon,
@@ -43,6 +49,18 @@ pub struct App {
     pub playlists: Vec<String>,
     pub current_playlist: Option<String>,
 
+    // 在线（插件）状态
+    pub plugins: Vec<PluginInfo>,
+    /// 提供在线搜索/下载的插件（第一个带 search + download 方法的）
+    pub online_plugin: Option<PluginInfo>,
+    pub online: Option<OnlineState>,
+    /// 在途/已完成的下载，按 daemon 分配的任务号索引
+    pub downloads: HashMap<u64, DownloadState>,
+    /// 后台请求（在线搜索）的回执；gen 防止过期结果覆盖新查询
+    replies_tx: Sender<AsyncReply>,
+    replies: std::sync::mpsc::Receiver<AsyncReply>,
+    search_generation: u64,
+
     // 每个列表的选中下标（列表空时为 0，渲染时注意 len==0）
     pub queue_selected: usize,
     pub library_selected: usize,
@@ -54,6 +72,7 @@ pub struct App {
     pub scroll_queue: usize,
     pub scroll_library: usize,
     pub scroll_playlists: usize,
+    pub scroll_online: usize,
     pub help_scroll: usize,
     // 首次载入后把选中项定位到正在播放的曲目/歌单，之后不再抢焦点
     seeded_queue: bool,
@@ -74,10 +93,12 @@ pub struct App {
     need_queue: bool,
     need_library: bool,
     need_playlists: bool,
+    need_plugins: bool,
 }
 
 impl App {
     pub fn new(daemon: Daemon) -> Self {
+        let (replies_tx, replies) = channel();
         Self {
             daemon,
             mode: Mode::Normal,
@@ -88,6 +109,13 @@ impl App {
             library: Vec::new(),
             playlists: Vec::new(),
             current_playlist: None,
+            plugins: Vec::new(),
+            online_plugin: None,
+            online: None,
+            downloads: HashMap::new(),
+            replies_tx,
+            replies,
+            search_generation: 0,
             queue_selected: 0,
             library_selected: 0,
             playlists_selected: 0,
@@ -96,6 +124,7 @@ impl App {
             scroll_queue: 0,
             scroll_library: 0,
             scroll_playlists: 0,
+            scroll_online: 0,
             help_scroll: 0,
             seeded_queue: false,
             seeded_playlists: false,
@@ -110,6 +139,7 @@ impl App {
             need_queue: false,
             need_library: false,
             need_playlists: false,
+            need_plugins: false,
         }
     }
 
@@ -119,6 +149,7 @@ impl App {
         self.need_queue = true;
         self.need_library = true;
         self.need_playlists = true;
+        self.need_plugins = true;
     }
 
     // ---- 主循环接口 -------------------------------------------------------
@@ -151,7 +182,7 @@ impl App {
         }
     }
 
-    /// 取走 daemon 推送并转化成刷新标记。
+    /// 取走 daemon 推送并转化成刷新标记；顺带收取后台请求的回执。
     pub fn pump_events(&mut self) {
         for feed in self.daemon.try_drain() {
             match feed {
@@ -171,9 +202,21 @@ impl App {
                     | Event::VolumeChanged { .. }
                     | Event::ModeChanged { .. },
                 ) => self.need_status = true,
+                Feed::Daemon(Event::Plugin { plugin, call, data }) => {
+                    self.apply_plugin_event(&plugin, call, &data);
+                }
                 Feed::Disconnected => {
                     self.fatal = Some("与 rmusd 失去连接".into());
                 }
+            }
+        }
+        // 后台线程的搜索回执（过期的直接丢）
+        while let Ok(reply) = self.replies.try_recv() {
+            match reply {
+                AsyncReply::OnlineSearch { generation, query, result } if generation == self.search_generation => {
+                    self.apply_online_search(&query, result);
+                }
+                AsyncReply::OnlineSearch { .. } => {}
             }
         }
     }
@@ -212,6 +255,15 @@ impl App {
                         .unwrap_or(None);
                 self.clamp_selections();
                 self.seed_playlist_selection();
+            }
+        }
+        if self.need_plugins {
+            self.need_plugins = false;
+            if let Ok(value) = self.daemon.request(Request::PluginList) {
+                self.plugins =
+                    serde_json::from_value(value.get("plugins").cloned().unwrap_or_default())
+                        .unwrap_or_default();
+                self.online_plugin = self.plugins.iter().find(|p| p.supports_online()).cloned();
             }
         }
     }

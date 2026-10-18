@@ -35,11 +35,17 @@ impl App {
             Next => self.simple(Request::Next),
             Prev => self.simple(Request::Prev),
             Stop => self.simple(Request::Stop),
-            RemoveSelected => self.remove_selected(),
-            RemoveCurrent => {
-                self.simple(Request::Remove { index: None });
-                self.need_queue = true;
-            }
+            RemoveSelected => match self.tab {
+                Tab::Online => self.download_selected(false),
+                _ => self.remove_selected(),
+            },
+            RemoveCurrent => match self.tab {
+                Tab::Online => self.cancel_selected_download(),
+                _ => {
+                    self.simple(Request::Remove { index: None });
+                    self.need_queue = true;
+                }
+            },
             MoveUp => self.move_selected(-1),
             MoveDown => self.move_selected(1),
             AddSelected => self.add_selected_to_queue(),
@@ -55,7 +61,7 @@ impl App {
                         self.enter_input(InputPurpose::RenamePlaylist(name.clone()), name);
                     }
                 }
-                Tab::Library => {}
+                Tab::Library | Tab::Online => {}
             },
             ClearQueue => {
                 self.simple(Request::Clear);
@@ -70,7 +76,17 @@ impl App {
             ToggleRandom => self.simple(Request::SetRandom { on: None }),
             VolumeUp => self.simple(Request::AdjustVolume { delta: 0.05 }),
             VolumeDown => self.simple(Request::AdjustVolume { delta: -0.05 }),
-            Search => self.open_search(),
+            Search => match self.tab {
+                // 在线视图里 / 是在线搜索（预填上次关键词）
+                Tab::Online => {
+                    let last = self
+                        .online
+                        .as_ref()
+                        .map_or(String::new(), |o| o.query.clone());
+                    self.enter_input(InputPurpose::OnlineSearch, last);
+                }
+                _ => self.open_search(),
+            },
             Command => self.open_palette(),
             SavePlaylist => {
                 let name = self.current_playlist.clone().unwrap_or_default();
@@ -82,10 +98,13 @@ impl App {
 
     /// 切视图。进音乐库时重新拉索引：daemon 会在文件变化时自动重建，
     /// TUI 不收推送，进视图拉一次保证看到的是最新库。
+    /// 进在线视图时刷新插件清单（可能刚装了插件、重启了 daemon）。
     fn switch_tab(&mut self, tab: Tab) {
         self.tab = tab;
-        if tab == Tab::Library {
-            self.need_library = true;
+        match tab {
+            Tab::Library => self.need_library = true,
+            Tab::Online => self.need_plugins = true,
+            _ => {}
         }
     }
 

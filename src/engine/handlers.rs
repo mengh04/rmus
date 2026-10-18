@@ -241,6 +241,10 @@ impl Engine {
             Request::PlaylistAdd { .. } => Err("内部错误：PlaylistAdd 未在 daemon 层处理".into()),
             // Quit 由 daemon 层处理，不应到达这里
             Request::Quit => Err("内部错误：Quit 未在 daemon 层处理".into()),
+            // 插件请求都在 daemon 层（plugin_host）处理，进不来这里
+            Request::PluginList | Request::PluginCall { .. } | Request::PluginCancel { .. } => {
+                Err("内部错误：插件请求未在 daemon 层处理".into())
+            }
             // Find/PlayMatch/LibList/LibRescan 由 daemon 层处理（查库/扫描），不应到达这里
             Request::Find { .. } | Request::PlayMatch { .. } | Request::LibList
             | Request::LibRescan => {

@@ -91,5 +91,7 @@ pub(super) async fn handle_event(
                 ])
                 .await;
         }
+        // 插件事件与桌面媒体接口无关
+        Event::Plugin { .. } => {}
     }
 }

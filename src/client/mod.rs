@@ -64,7 +64,21 @@ impl Client {
     }
 
     /// 发送请求并等待响应。成功返回 `result` 字段，失败返回 daemon 的错误文本。
+    ///
+    /// 读侧带 30s 超时：daemon 卡死或新旧版本协议不匹配（旧 daemon 对
+    /// 未知方法回的差错行 id 对不上）时给出明确错误，而不是永久挂死。
     pub fn request(&mut self, request: Request) -> Result<serde_json::Value> {
+        const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
+        self.stream.set_read_timeout(Some(REPLY_TIMEOUT))?;
+        let result = self.request_inner(request);
+        // 恢复无超时：这条流后续还可能被复用，别把别的用途拖下水
+        let _ = self.stream.set_read_timeout(None);
+        result
+    }
+
+    fn request_inner(&mut self, request: Request) -> Result<serde_json::Value> {
+        use std::io::ErrorKind;
+
         let msg = RequestMsg {
             id: self.next_id,
             request,
@@ -78,9 +92,14 @@ impl Client {
         let mut buf = String::new();
         loop {
             buf.clear();
-            let n = self.reader.read_line(&mut buf)?;
-            if n == 0 {
-                bail!("与 rmusd 的连接已关闭");
+            match self.reader.read_line(&mut buf) {
+                Ok(0) => bail!("与 rmusd 的连接已关闭"),
+                Ok(_) => {}
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {
+                    bail!("等待 rmusd 响应超时（rmusd 未响应或版本过旧？试着 rmus quit 后重开）")
+                }
+                Err(e) => return Err(e.into()),
             }
             let value: serde_json::Value = match serde_json::from_str(buf.trim_end()) {
                 Ok(v) => v,

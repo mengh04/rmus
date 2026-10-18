@@ -72,6 +72,14 @@ enum Command {
     Lib(Lib),
     /// 库模糊搜索，列出候选（`rmus find secret`）
     Find { query: String },
+    /// 在线搜索/下载（走 rmusd 的插件，如 rmus-dl；产物自动进 ~/Music）
+    Dl {
+        /// 搜索关键词（多词自动拼接）
+        query: Vec<String>,
+        /// 下载第几个结果（从 1 数，逗号分隔，如 `-g 1,3`）；缺省只列出结果
+        #[arg(short, long)]
+        get: Option<String>,
+    },
     /// 试听：保存当前状态，临时换成这些文件播放；播完自动恢复原队列与进度
     Peek { paths: Vec<PathBuf> },
     /// 结束试听，恢复进入试听前的队列与进度

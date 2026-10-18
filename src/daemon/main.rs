@@ -7,6 +7,7 @@
 //! 子模块：
 //! - [`conn`]：单条连接（读写任务、事件转发）
 //! - [`dispatch`]：请求分发（库查询就地回，扫描丢阻塞线程池，其余进引擎）
+//! - [`plugin_host`]：插件宿主（发现、会话、调用转发）
 //! - [`reply`]：回复/错误行编码
 //! - [`watch`]：库目录监听
 //! - [`mpris`]：Linux 桌面媒体集成
@@ -14,6 +15,7 @@
 mod conn;
 mod dispatch;
 mod mpris;
+mod plugin_host;
 mod reply;
 mod watch;
 
@@ -89,8 +91,15 @@ fn main() -> Result<()> {
         // 实时监听库目录：新文件落地后自动更新索引（防抖 2s）
         spawn_library_watcher(library.clone())?;
 
-        // 信号处理：退出时清理 socket 文件
+        // 插件宿主：扫描插件目录、握手、按需托管会话
+        let plugins = plugin_host::PluginHost::discover(events_tx.clone()).await;
+        if plugins.is_empty() {
+            println!("[rmusd] 未发现插件（可选装，不影响播放）");
+        }
+
+        // 信号处理：退出时清理 socket 文件与插件子进程
         let sock_for_cleanup = sock.clone();
+        let plugins_for_signal = plugins.clone();
         tokio::spawn(async move {
             use tokio::signal::unix::{SignalKind, signal};
             let mut term = signal(SignalKind::terminate()).expect("注册 SIGTERM");
@@ -99,6 +108,7 @@ fn main() -> Result<()> {
                 _ = term.recv() => {}
             }
             let _ = std::fs::remove_file(&sock_for_cleanup);
+            plugins_for_signal.shutdown();
             std::process::exit(0);
         });
 
@@ -110,6 +120,7 @@ fn main() -> Result<()> {
                         cmd_tx.clone(),
                         events_tx.subscribe(),
                         library.clone(),
+                        plugins.clone(),
                     ));
                 }
                 Err(e) => eprintln!("[rmusd] 接受连接失败: {e}"),

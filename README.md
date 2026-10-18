@@ -32,6 +32,7 @@ rmus volume 70             # absolute, or relative like +10
 rmus status
 rmus queue                 # show the queue
 rmus seek 1:23             # or +10 / -10 for relative
+rmus dl <keyword> -g 1,3   # online search / download via a plugin (see Plugins)
 rmus quit                  # stop the daemon
 ```
 
@@ -75,6 +76,36 @@ support 24-bit color.
 | `RMUS_COLOR=256` | Force the 256-color approximation |
 | `NO_COLOR=1` | Monochrome: hierarchy moves to reverse video, rules and bars to glyphs |
 
+## Plugins
+
+rmusd hosts out-of-process plugins: independent executables that speak a small
+NDJSON protocol over stdio. The player itself stays capability-agnostic — it
+knows nothing about what a plugin does.
+
+- Discovery: `$XDG_DATA_HOME/rmus/plugins/*` (default `~/.local/share/rmus/plugins`),
+  `~/.config/rmus/plugins/*`, `$XDG_DATA_DIRS/*/rmus/plugins`; override with
+  `RMUS_PLUGIN_DIR` (colon-separated)
+- Each executable is handshaked via `--rmus-manifest`, then spawned long-lived
+  as `--rmus-plugin` on first use; sessions idle out after 10 minutes
+- Calls the manifest marks as `task` return a job number immediately and stream
+  progress to every client as `Event::Plugin`; `call` methods block up to 30s
+
+The reference plugin is [rmus-dl](https://github.com/): online search +
+download (kuwo / kugou). Install its binary into the plugins directory and
+restart `rmusd`:
+
+```
+cargo install --git <rmus-dl-url>   # or build locally
+mkdir -p ~/.local/share/rmus/plugins
+ln -s ~/.cargo/bin/rmus-dl ~/.local/share/rmus/plugins/
+```
+
+Then the TUI grows an `在线` tab: `/` searches, `d` downloads (progress in the
+duration column), `Enter` downloads and peek-plays when done, `x` cancels.
+Finished files are written straight into `~/Music` with full tags, where the
+library watcher picks them up automatically. Wire protocol details:
+[docs/plugins.md](docs/plugins.md).
+
 Detailed documentation is coming later.
 
 ## Layout
@@ -85,6 +116,7 @@ single responsibility and a doc comment explaining it.
 ```
 src/
   proto.rs              wire protocol (NDJSON)
+  plugin.rs             plugin contract: discovery, manifest, session wire format
   engine/               audio engine (single thread, owns queue + device)
     mod.rs              Engine state, spawn, status
     run.rs              event loop (commands, decoder reports, position pushes)
@@ -96,7 +128,8 @@ src/
   daemon/               rmusd
     main.rs             startup wiring (engine, MPRIS, library, socket)
     conn.rs             one client connection (writer task, event fan-out)
-    dispatch.rs         routing: library queries, scans, engine commands
+    dispatch.rs         routing: library queries, scans, plugin calls, engine commands
+    plugin_host.rs      plugin host: discovery, sessions, call forwarding
     reply.rs            NDJSON reply encoding
     watch.rs            library directory watcher
     mpris/              desktop integration (art, metadata, events, root/player interfaces)
