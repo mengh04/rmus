@@ -13,8 +13,7 @@ use format::{
     status_reply,
 };
 use playlist::handle_pl;
-use rmus::proto::{Request, TrackInfo};
-use serde_json::json;
+use rmus::proto::{Request, StatusInfo, TrackInfo};
 
 /// 入口：先规整路径，再按子命令分发；无子命令时进 TUI。
 pub(crate) fn run(mut cli: Cli) -> Result<()> {
@@ -90,7 +89,6 @@ pub(crate) fn run(mut cli: Cli) -> Result<()> {
                 );
             }
         }
-        Command::Dl { query, get } => handle_dl(&mut client, &query.join(" "), get.as_deref())?,
         Command::Pause => {
             print_status(&status_reply(client.request(Request::Pause)?)?);
         }
@@ -186,100 +184,126 @@ pub(crate) fn run(mut cli: Cli) -> Result<()> {
             client.request(Request::Quit)?;
             println!("rmusd 已退出");
         }
+        Command::Restart => {
+            restart(&cli)?;
+        }
+        Command::Plugins => {
+            // restart 已退出读循环，这里重连一次
+            let mut client = connect(&cli)?;
+            let value = client.request(Request::PluginList)?;
+            let plugins = value
+                .get("plugins")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if plugins.is_empty() {
+                println!("未发现插件（插件目录见 docs/plugins.md）");
+            }
+            for p in &plugins {
+                let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                let version = p.get("version").and_then(|v| v.as_str()).unwrap_or("?");
+                let ui = p.get("ui").and_then(|v| v.as_bool()).unwrap_or(false);
+                let methods: Vec<&str> = p
+                    .get("methods")
+                    .and_then(|v| v.as_array())
+                    .map(|list| {
+                        list.iter()
+                            .filter_map(|m| m.get("name").and_then(|n| n.as_str()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let kind = if ui { " [UI]" } else { "" };
+                println!("{name} {version}{kind}  {}", methods.join(", "));
+            }
+        }
     }
     Ok(())
 }
 
-/// `rmus dl`：在线搜索 / 下载。挑第一个提供 search+download 的插件。
-fn handle_dl(
-    client: &mut rmus::client::Client,
-    query: &str,
-    get: Option<&str>,
-) -> Result<()> {
-    if query.is_empty() {
-        bail!("用法：rmus dl <关键词> [-g 1,3]");
-    }
-    let value = client.request(Request::PluginList)?;
-    let plugins: Vec<serde_json::Value> = value
-        .get("plugins")
-        .cloned()
-        .unwrap_or_default()
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    let usable = plugins.iter().find(|p| {
-        let methods = p.get("methods").and_then(|m| m.as_array()).cloned().unwrap_or_default();
-        methods.iter().any(|m| m.get("name").and_then(|n| n.as_str()) == Some("search"))
-            && methods.iter().any(|m| m.get("name").and_then(|n| n.as_str()) == Some("download"))
-    });
-    let Some(plugin) = usable.and_then(|p| p.get("name").and_then(|n| n.as_str()).map(String::from))
-    else {
-        bail!("未发现可用的在线搜索插件（把 rmus-dl 装入插件目录后重启 rmusd）");
-    };
+/// `rmus restart`：抓播放现场 → 停旧 daemon → 拉起新 daemon → 恢复播放。
+/// 注意读循环会在 Quit 响应后结束，所以这里不走外层的 `client`。
+fn restart(cli: &Cli) -> Result<()> {
+    use std::time::Duration;
 
-    let value = client.request(Request::PluginCall {
-        plugin: plugin.clone(),
-        method: "search".into(),
-        params: json!({"query": query}),
-    })?;
-    let songs = value
-        .get("songs")
-        .cloned()
-        .unwrap_or_default()
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    if songs.is_empty() {
-        println!("没有匹配 “{query}” 的结果");
-        return Ok(());
-    }
-    for (i, song) in songs.iter().enumerate() {
-        let title = song.get("title").and_then(|v| v.as_str()).unwrap_or("");
-        let artist = song.get("artist").and_then(|v| v.as_str()).unwrap_or("");
-        let album = song.get("album").and_then(|v| v.as_str()).unwrap_or("");
-        let source = song.get("source").and_then(|v| v.as_str()).unwrap_or("?");
-        let duration = song
-            .get("duration_ms")
-            .and_then(|v| v.as_u64())
-            .filter(|ms| *ms > 0)
-            .map(fmt_mmss)
-            .unwrap_or_else(|| "--:--".into());
-        // 品质：格式 + 体积估计（下载前已知的那部分）
-        let format = song.get("format").and_then(|v| v.as_str());
-        let size = song.get("size_bytes").and_then(|v| v.as_u64());
-        let quality = match (format, size) {
-            (Some(f), Some(bytes)) => format!(" {f} {}M", (bytes + 512 * 1024) / (1024 * 1024)),
-            (Some(f), None) => format!(" {f}"),
-            (None, _) => String::new(),
-        };
-        println!(
-            "{:>3}. [{source}{quality}] {title} - {artist}  {album}  {duration}",
-            i + 1
-        );
-    }
+    let socket = cli.socket.clone().unwrap_or_else(rmus::socket_path);
 
-    let Some(get) = get else {
-        println!("（加 -g 序号 下载，如 -g 1,3；产物自动进入 ~/Music）");
-        return Ok(());
-    };
-    for index in get.split(',') {
-        let Ok(index) = index.trim().parse::<usize>() else {
-            bail!("序号应为数字：{get}");
-        };
-        if index == 0 || index > songs.len() {
-            bail!("序号 {index} 超出范围（1-{}）", songs.len());
+    // 停前抓播放现场（队列 + 当前进度/音量/模式）；抓不到就只重启不恢复
+    let snapshot: Option<(Vec<TrackInfo>, StatusInfo)> =
+        rmus::client::Client::connect(cli.socket.clone()).ok().and_then(|mut c| {
+            let tracks: Vec<TrackInfo> = serde_json::from_value(
+                c.request(Request::QueueList).ok()?.get("tracks").cloned()?,
+            )
+            .ok()?;
+            let status: StatusInfo = serde_json::from_value(c.request(Request::Status).ok()?).ok()?;
+            Some((tracks, status))
+        });
+
+    // 旧 daemon 在跑就请它退出（连不上 = 没在跑，直接拉起）
+    if rmus::client::Client::connect(cli.socket.clone()).is_ok() {
+        let _ = rmus::client::Client::connect(cli.socket.clone())
+            .and_then(|mut c| c.request(Request::Quit));
+        println!("已请求旧 rmusd 退出…");
+    }
+    // 等 socket 不可连（进程退出；socket 文件可能残留，新 daemon 会清理）
+    for _ in 0..30 {
+        if rmus::client::Client::connect(cli.socket.clone()).is_err() {
+            break;
         }
-        let song = &songs[index - 1];
-        let title = song.get("title").and_then(|v| v.as_str()).unwrap_or("");
-        let value = client.request(Request::PluginCall {
-            plugin: plugin.clone(),
-            method: "download".into(),
-            params: json!({"song": song}),
-        })?;
-        let call = value.get("call").and_then(|v| v.as_u64()).unwrap_or(0);
-        println!("任务 #{call} 已提交：“{title}”（rmusd 后台下载，完成后自动入库）");
+        std::thread::sleep(Duration::from_millis(100));
     }
-    Ok(())
+
+    if cli.no_spawn {
+        bail!("--no-spawn：旧 rmusd 已退出，跳过自动拉起");
+    }
+    rmus::client::start_daemon(&socket).context("拉起新 rmusd 失败")?;
+
+    // 等新 daemon 就绪（socket 可连且能应答），随后恢复播放现场
+    for _ in 0..50 {
+        if let Ok(mut client) = rmus::client::Client::connect(cli.socket.clone()) {
+            client
+                .request(Request::Status)
+                .context("新 rmusd 无响应")?;
+            println!("rmusd 已重启（{}）", socket.display());
+
+            // 恢复现场：重建队列 → 音量/循环 → 跳回原曲目 → 恢复随机（最后，
+            // 免得 Open/Play 被随机干扰）→ 进度拉回原位置。
+            if let Some((tracks, status)) = snapshot
+                && !tracks.is_empty()
+            {
+                client.request(Request::Open {
+                    paths: tracks.iter().map(|t| t.path.clone()).collect(),
+                })?;
+                client.request(Request::SetVolume {
+                    value: status.volume,
+                })?;
+                client.request(Request::SetRepeat {
+                    mode: Some(status.repeat),
+                })?;
+                if let Some(index) = status.current {
+                    client.request(Request::Play { index: Some(index) })?;
+                }
+                client.request(Request::SetRandom { on: Some(status.random) })?;
+                if status.position_ms > 0 {
+                    client.request(Request::Seek {
+                        position_ms: status.position_ms,
+                    })?;
+                }
+                println!(
+                    "已恢复播放：{}（{} 首队列，进度 {}）",
+                    status
+                        .track
+                        .as_ref()
+                        .map(|t| t.title.as_str())
+                        .unwrap_or("未知曲目"),
+                    tracks.len(),
+                    fmt_mmss(status.position_ms),
+                );
+            }
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    bail!("rmusd 重启超时（10s 内未就绪）")
 }
 
 /// 相对路径转绝对路径（以客户端 CWD 解释），不解析符号链接。

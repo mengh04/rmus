@@ -60,11 +60,28 @@ pub struct StatusInfo {
     pub peeking: bool,
 }
 
+/// UI 插件的按键事件编码：`kind | (payload << 8)`。与 `crates/wasm-host`、
+/// `crates/plugin-sdk` 的 `event` 模块是同一张表（v0 三处各写一份，
+/// 正式化后挪共享 crate）。
+pub mod plugin_key {
+    pub const KIND_TICK: i32 = 1;
+    pub const KIND_ENTER: i32 = 2;
+    pub const KIND_UP: i32 = 3;
+    pub const KIND_DOWN: i32 = 4;
+    pub const KIND_CHAR: i32 = 5;
+    pub const KIND_SPACE: i32 = 6;
+    /// 后台任务事件（数据在宿主缓冲，插件经 SDK `task::last_event()` 取）
+    pub const KIND_DATA: i32 = 7;
+
+    pub fn encode(kind: i32, payload: i32) -> i32 {
+        kind | (payload << 8)
+    }
+}
+
 /// 客户端请求。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
-pub enum Request {
-    /// 查询状态快照
+pub enum Request {    /// 查询状态快照
     Status,
     /// 添加文件/目录到队列尾部（目录递归扫描）。由 daemon 层完成扫描后转发给引擎。
     Add { paths: Vec<PathBuf> },
@@ -142,6 +159,20 @@ pub enum Request {
     },
     /// 取消插件长任务（daemon 层处理）
     PluginCancel { plugin: String, call: u64 },
+    /// 给 UI 插件注入按键。视图更新经 `Event::PluginView` 异步推送。
+    PluginKey {
+        plugin: String,
+        /// 插件 ABI 的事件整数（键位映射进插件 SDK 的 `event` 模块）
+        key: i32,
+        rows: u16,
+        cols: u16,
+    },
+    /// 请求 UI 插件的当前视图（打开视图 / 终端 resize 时）。daemon 拉一次
+    /// render 并以 `Event::PluginView` 推回。
+    PluginViewReq { plugin: String, rows: u16, cols: u16 },
+    /// 给 UI 插件注入数据（如搜索关键词）。插件以 `KIND_DATA` 事件收到，
+    /// 经 SDK `task::last_event()` 读取 `{"data":...}`。
+    PluginData { plugin: String, data: serde_json::Value },
     /// 请求 daemon 退出（daemon 层处理，不进引擎）
     Quit,
 }
@@ -184,6 +215,41 @@ pub enum Event {
         call: Option<u64>,
         data: serde_json::Value,
     },
+    /// UI 插件（wasm）的视图更新：`render()` 输出的行序列。
+    PluginView {
+        plugin: String,
+        lines: Vec<PluginLine>,
+        /// 插件声明的选中行（画布行号；插件未声明 = None，宿主沿用旧值）
+        #[serde(default)]
+        selected: Option<usize>,
+    },
+}
+
+/// UI 插件渲染输出的一行。行内是带语义样式的 span 序列；
+/// `style` 令牌（base/strong/faint/accent/danger）由客户端映射到主题。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginLine {
+    pub spans: Vec<PluginSpan>,
+}
+
+/// UI 插件渲染输出的一个片段。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginSpan {
+    pub text: String,
+    #[serde(default)]
+    pub style: String,
+}
+
+impl PluginLine {
+    /// 纯文本行的便捷构造（v0 宿主把 `print_line` 的每行这样包装）。
+    pub fn plain(text: impl Into<String>) -> Self {
+        Self {
+            spans: vec![PluginSpan {
+                text: text.into(),
+                style: "base".into(),
+            }],
+        }
+    }
 }
 
 /// 客户端 -> 服务端的单行请求。

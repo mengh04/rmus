@@ -146,14 +146,19 @@ impl Client {
 
 /// 尝试拉起一个后台 rmusd（detach，独立进程组，不随本客户端退出）。
 fn spawn_daemon(socket: &Path, connect_err: &std::io::Error) -> Result<()> {
+    start_daemon(socket).with_context(|| {
+        format!("无法连接 rmusd（{connect_err}），自动拉起失败")
+    })
+}
+
+/// 拉起一个后台 rmusd（`rmus restart` 也用）。
+pub fn start_daemon(socket: &Path) -> Result<()> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
     // 陈旧 socket 文件会导致 bind 失败，rmusd 自己会处理（connect 失败则删除），
     // 这里只需要找到可执行文件
-    let exe = find_rmusd().with_context(|| {
-        format!("无法连接 rmusd（{connect_err}），也找不到 rmusd 可执行文件来自动拉起")
-    })?;
+    let exe = find_rmusd().context("找不到 rmusd 可执行文件")?;
 
     Command::new(exe)
         .arg("--socket")

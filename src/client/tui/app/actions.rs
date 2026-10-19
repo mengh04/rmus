@@ -21,9 +21,20 @@ impl App {
                     self.help_scroll = 0;
                 }
             }
-            NextTab => self.switch_tab(self.tab.next()),
-            PrevTab => self.switch_tab(self.tab.prev()),
-            GotoTab(n) => self.switch_tab(super::Tab::ALL[n]),
+            NextTab => {
+                let next = self.tab.next(&self.visible_tabs());
+                self.switch_tab(next);
+            }
+            PrevTab => {
+                let prev = self.tab.prev(&self.visible_tabs());
+                self.switch_tab(prev);
+            }
+            GotoTab(n) => {
+                let visible = self.visible_tabs();
+                if let Some(tab) = visible.get(n) {
+                    self.switch_tab(tab.clone());
+                }
+            }
             Up => self.move_selection(-1),
             Down => self.move_selection(1),
             Top => self.set_selection(0),
@@ -37,11 +48,19 @@ impl App {
             Prev => self.simple(Request::Prev),
             Stop => self.simple(Request::Stop),
             RemoveSelected => match self.tab {
-                Tab::Online => self.download_selected(false),
+                // 插件画布：d = 下载选中项（转发给内容插件）
+                Tab::Plugin(_) => self.send_tab_key(
+                    crate::proto::plugin_key::KIND_CHAR,
+                    'd' as i32,
+                ),
                 _ => self.remove_selected(),
             },
             RemoveCurrent => match self.tab {
-                Tab::Online => self.cancel_selected_download(),
+                // 插件画布：x = 取消最近的下载任务
+                Tab::Plugin(_) => self.send_tab_key(
+                    crate::proto::plugin_key::KIND_CHAR,
+                    'x' as i32,
+                ),
                 _ => {
                     // vim 剪切语义：删掉的正在播的曲子也进寄存器
                     if let Some(track) = self.status.as_ref().and_then(|s| s.track.clone()) {
@@ -71,7 +90,7 @@ impl App {
                         self.enter_input(InputPurpose::RenamePlaylist(name.clone()), name);
                     }
                 }
-                Tab::Library | Tab::Online => {}
+                Tab::Library | Tab::Plugin(_) | Tab::Plugins => {}
             },
             ClearQueue => {
                 self.simple(Request::Clear);
@@ -99,14 +118,14 @@ impl App {
             ToggleRandom => self.simple(Request::SetRandom { on: None }),
             VolumeUp => self.simple(Request::AdjustVolume { delta: 0.05 }),
             VolumeDown => self.simple(Request::AdjustVolume { delta: -0.05 }),
-            Search => match self.tab {
+            Search => match &self.tab {
                 // 在线视图里 / 是在线搜索（预填上次关键词）
-                Tab::Online => {
-                    let last = self
-                        .online
-                        .as_ref()
-                        .map_or(String::new(), |o| o.query.clone());
-                    self.enter_input(InputPurpose::OnlineSearch, last);
+                // 插件画布：内容插件满足在线约定才提供 / 搜索
+                Tab::Plugin(pt) => {
+                    if self.supports_online(&pt.plugin) {
+                        let plugin = pt.plugin.clone();
+                        self.enter_input(InputPurpose::PluginSearch(plugin), String::new());
+                    }
                 }
                 _ => self.open_search(),
             },
@@ -122,13 +141,16 @@ impl App {
     /// 切视图。进音乐库时重新拉索引：daemon 会在文件变化时自动重建，
     /// TUI 不收推送，进视图拉一次保证看到的是最新库。
     /// 进在线视图时刷新插件清单（可能刚装了插件、重启了 daemon）。
+    /// 在线视图 = rmus-dl 画布：进视图拉插件清单 + 请求画布。
     fn switch_tab(&mut self, tab: Tab) {
         self.tab = tab;
         self.exit_visual();
-        match tab {
-            Tab::Library => self.need_library = true,
-            Tab::Online => self.need_plugins = true,
-            _ => {}
+        // 插件画布：拉一次插件清单（可能刚装了插件）+ 请求对应画布
+        if let Some(plugin) = self.plugin_of_tab(&self.tab) {
+            self.need_plugins = true;
+            self.request_view(&plugin);
+        } else if self.tab == Tab::Library {
+            self.need_library = true;
         }
     }
 

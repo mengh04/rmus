@@ -1,0 +1,17 @@
+[package]
+name = "rmus-plugin-sdk"
+version = "0.1.0"
+edition = "2024"
+description = "rmus wasm 插件 SDK：宿主 ABI 的插件侧封装"
+license = "MIT"
+
+[features]
+# 实现 lofty::io::Truncate/Length（tag 写入库需要；详见 fs::File 文档）
+lofty-io = ["dep:lofty"]
+
+[dependencies]
+serde_json = "1"
+anyhow = "1"
+# 显示宽度计算（fit/pad 列对齐；与宿主渲染器同一 crate 保证规则一致）
+unicode-width = "0.2"
+lofty = { version = "0.25", optional = true }

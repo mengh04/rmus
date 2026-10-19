@@ -28,10 +28,10 @@ mod help;
 mod library;
 mod list;
 mod now_playing;
-mod online;
 mod palette;
 mod picker;
 mod playlists;
+mod plugins;
 mod queue;
 mod search;
 mod status;
@@ -72,13 +72,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // 没在放东西时，底部整条让给列表（只留一行键位提示）
     let has_track = app.status.as_ref().and_then(|s| s.track.as_ref()).is_some();
     let areas = layout(area, has_track);
+    // 记下内容区尺寸：发给插件（PluginKey/ViewReq 的 rows/cols）
+    app.viewport = (page_inset(areas.content).width, page_inset(areas.content).height);
 
     header::draw(frame, app, areas.top_bar);
     match app.tab {
         Tab::Queue => queue::draw(frame, app, page_inset(areas.content)),
         Tab::Library => library::draw(frame, app, page_inset(areas.content)),
         Tab::Playlists => playlists::draw(frame, app, page_inset(areas.content)),
-        Tab::Online => online::draw(frame, app, page_inset(areas.content)),
+        Tab::Plugin(_) | Tab::Plugins => plugins::draw(frame, app, page_inset(areas.content)),
     }
 
     rule(frame, theme, page_inset(areas.divider));

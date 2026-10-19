@@ -4,37 +4,67 @@ use crate::proto::TrackInfo;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
-/// 主界面视图。拓展：加变体 + 改 `Tab::ALL` / `title` 即可。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 主界面视图。核心 tab 恒在；插件 tab 由 manifest 的 `tab` 声明注册，
+/// 随插件清单动态增减（无插件注册时不出现）。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Tab {
     Queue,
     Library,
     Playlists,
-    /// 插件提供的在线搜索 / 下载（rmus-dl）
-    Online,
+    /// 核心面板：未注册 tab 的 UI 插件画布（demo / 面板型）+ 插件清单
+    Plugins,
+    /// 插件注册的 tab（标题即 manifest 的 `tab` 声明）
+    Plugin(PluginTab),
+}
+
+/// 一个插件注册的 tab 位：内容与标题都来自该插件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginTab {
+    /// 内容提供者（按键/数据/视图请求的寻址目标）
+    pub plugin: String,
+    /// tab 栏显示的标题（manifest 声明）
+    pub title: String,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 4] = [Tab::Queue, Tab::Library, Tab::Playlists, Tab::Online];
+    /// tab 栏的运行时形状，完全是插件清单的投影：
+    /// 核心 3 个（队列/音乐库/播放列表）+ 每个注册了 tab 的 UI 插件
+    /// 一项（按发现顺序）+「插件」面板（存在未注册 tab 的 UI 插件时）。
+    pub fn visible(plugins: &[PluginInfo]) -> Vec<Tab> {
+        let mut tabs = vec![Tab::Queue, Tab::Library, Tab::Playlists];
+        for p in plugins {
+            if p.ui && let Some(title) = &p.tab {
+                tabs.push(Tab::Plugin(PluginTab {
+                    plugin: p.name.clone(),
+                    title: title.clone(),
+                }));
+            }
+        }
+        if plugins.iter().any(|p| p.ui && p.tab.is_none()) {
+            tabs.push(Tab::Plugins);
+        }
+        tabs
+    }
 
-    pub fn title(self) -> &'static str {
+    pub fn title(&self) -> String {
         match self {
-            Tab::Queue => "队列",
-            Tab::Library => "音乐库",
-            Tab::Playlists => "播放列表",
-            Tab::Online => "在线",
+            Tab::Queue => "队列".into(),
+            Tab::Library => "音乐库".into(),
+            Tab::Playlists => "播放列表".into(),
+            Tab::Plugins => "插件".into(),
+            Tab::Plugin(pt) => pt.title.clone(),
         }
     }
 
-    pub fn next(self) -> Self {
-        let i = Self::ALL.iter().position(|t| *t == self).unwrap_or(0);
-        Self::ALL[(i + 1) % Self::ALL.len()]
+    pub fn next(&self, visible: &[Tab]) -> Tab {
+        let i = visible.iter().position(|t| t == self).unwrap_or(0);
+        visible[(i + 1) % visible.len()].clone()
     }
 
-    pub fn prev(self) -> Self {
-        let i = Self::ALL.iter().position(|t| *t == self).unwrap_or(0);
-        let n = Self::ALL.len();
-        Self::ALL[(i + n - 1) % n]
+    pub fn prev(&self, visible: &[Tab]) -> Tab {
+        let i = visible.iter().position(|t| t == self).unwrap_or(0);
+        let n = visible.len();
+        visible[(i + n - 1) % n].clone()
     }
 }
 
@@ -46,8 +76,8 @@ pub enum InputPurpose {
     RenamePlaylist(String),
     /// 新建空播放列表（播放列表 tab 按 a）
     NewPlaylist,
-    /// 在线搜索关键词（确认时走插件的 search）
-    OnlineSearch,
+    /// 插件搜索关键词（携带内容插件名；确认时发 PluginData submit）
+    PluginSearch(String),
 }
 
 impl InputPurpose {
@@ -57,14 +87,26 @@ impl InputPurpose {
             InputPurpose::SavePlaylist => ":w ",
             InputPurpose::RenamePlaylist(_) => ":rename ",
             InputPurpose::NewPlaylist => "新建 ",
-            InputPurpose::OnlineSearch => "/ ",
+            InputPurpose::PluginSearch(_) => "/ ",
         }
     }
+}
+
+/// 一个插件画布在 TUI 侧的本地状态（视图缓存 + 导航），按插件名分槽。
+#[derive(Debug, Default)]
+pub struct PluginUi {
+    /// 插件最近一次推送的视图行
+    pub view: Vec<crate::proto::PluginLine>,
+    /// 选中行（插件经 `rmus_set_selected` 声明的画布行号；TUI 用它铺
+    /// 选中底色）
+    pub selected: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
     Normal,
+    /// UI 插件按键直通：除 Esc 外的按键全部转给插件（插件 tab 按 `i` 进入）
+    Plugin,
     /// Telescope 式搜索面板：输入与实时结果一体（`search::handle_key` 处理）
     Search,
     /// Telescope 式命令面板（`palette::handle_key` 处理）
@@ -95,36 +137,6 @@ pub struct SearchState {
     pub pending_g: bool,
 }
 
-/// 在线 tab 状态：最近一次搜索的关键词与结果。
-#[derive(Debug, Default)]
-pub struct OnlineState {
-    pub query: String,
-    pub songs: Vec<OnlineSong>,
-    pub selected: usize,
-}
-
-/// 一条在线搜索结果；字段形状即插件协议的 `song` 对象（下载时原样回传）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OnlineSong {
-    pub title: String,
-    #[serde(default)]
-    pub artist: String,
-    #[serde(default)]
-    pub album: String,
-    /// 来源标识（如 kuwo / kugou），插件回源用
-    pub source: String,
-    /// 源内唯一标识
-    pub song_id: String,
-    #[serde(default)]
-    pub duration_ms: u64,
-    /// 下载前已知的格式标注："flac" / "320k" / ...；源给不出为 None
-    #[serde(default)]
-    pub format: Option<String>,
-    /// 该格式的体积估计（字节）
-    #[serde(default)]
-    pub size_bytes: Option<u64>,
-}
-
 /// 已发现插件的信息（`plugin list`）。methods 形状即协议的
 /// `[{name,kind}]`，直接复用契约类型。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,6 +144,12 @@ pub struct PluginInfo {
     pub name: String,
     #[serde(default)]
     pub version: String,
+    /// UI 插件（wasm）：宿主提供按键/渲染通道
+    #[serde(default)]
+    pub ui: bool,
+    /// 插件注册的 TUI tab 标题（manifest `tab` 声明）；None = 不占 tab 位
+    #[serde(default)]
+    pub tab: Option<String>,
     #[serde(default)]
     pub methods: Vec<crate::plugin::PluginMethod>,
 }
@@ -142,33 +160,6 @@ impl PluginInfo {
         let names: Vec<&str> = self.methods.iter().map(|m| m.name.as_str()).collect();
         names.contains(&"search") && names.contains(&"download")
     }
-}
-
-/// 一次下载在界面上的踪迹（按 daemon 分配的任务号 call 索引）。
-#[derive(Debug)]
-pub struct DownloadState {
-    pub song: OnlineSong,
-    pub received: u64,
-    pub total: Option<u64>,
-    pub status: DownloadStatus,
-    /// 完成后自动试听（Peek）
-    pub peek: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DownloadStatus {
-    Running,
-    Done,
-    Failed(String),
-}
-
-/// 后台线程回来的异步回复（同步 Client 不能在主线程久等，搜索走这边）。
-pub enum AsyncReply {
-    OnlineSearch {
-        generation: u64,
-        query: String,
-        result: anyhow::Result<serde_json::Value>,
-    },
 }
 
 /// `:` 命令面板状态；`None` = 未打开。与 [`Mode::Command`] 同生共死。
@@ -259,4 +250,92 @@ impl Message {
 /// 协议回复里取 `tracks` 数组。
 pub(super) fn parse_tracks(value: &serde_json::Value) -> Vec<TrackInfo> {
     serde_json::from_value(value.get("tracks").cloned().unwrap_or_default()).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plugin(name: &str, ui: bool, tab: Option<&str>) -> PluginInfo {
+        serde_json::from_value(serde_json::json!({
+            "name": name, "version": "0.0.0", "ui": ui, "tab": tab,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn tab_bar_follows_plugin_registrations() {
+        // 无 UI 插件：只有核心 3 个（连「插件」面板都不出现）
+        let tabs = Tab::visible(&[]);
+        assert_eq!(tabs.len(), 3);
+        assert!(!tabs.iter().any(|t| matches!(t, Tab::Plugin(_) | Tab::Plugins)));
+
+        // 只有注册了 tab 的插件：仍然没有「插件」面板
+        let tabs = Tab::visible(&[plugin("rmus-dl", true, Some("在线"))]);
+        assert_eq!(tabs.len(), 4);
+        assert!(!tabs.iter().any(|t| *t == Tab::Plugins));
+
+        // rmus-dl（注册「在线」）+ hello（未注册）+ echo（注册「演示」）：
+        // 按清单顺序插入插件 tab，标题用声明的字符串
+        let plugins = vec![
+            plugin("rmus-dl", true, Some("在线")),
+            plugin("hello", true, None),
+            plugin("echo", true, Some("演示")),
+        ];
+        let tabs = Tab::visible(&plugins);
+        assert_eq!(tabs.len(), 6);
+        assert_eq!(tabs[3], Tab::Plugin(PluginTab {
+            plugin: "rmus-dl".into(), title: "在线".into(),
+        }));
+        assert_eq!(tabs[4], Tab::Plugin(PluginTab {
+            plugin: "echo".into(), title: "演示".into(),
+        }));
+        assert_eq!(tabs[5], Tab::Plugins);
+        // tab 标题直接来自插件声明
+        assert_eq!(tabs[3].title(), "在线");
+        assert_eq!(tabs[4].title(), "演示");
+
+        // 非法形态：声明了 tab 但不是 UI 插件——不占 tab 位，
+        // 也不触发「插件」面板（它不是合法的 UI 插件）
+        let plugins = vec![plugin("fake", false, Some("幽灵"))];
+        assert_eq!(Tab::visible(&plugins).len(), 3);
+    }
+
+    #[test]
+    fn tab_cycle_skips_unregistered() {
+        // 无 UI 插件时 next/prev 在核心 3 个里循环
+        let tabs = Tab::visible(&[]);
+        assert_eq!(tabs[0].next(&tabs), Tab::Library);
+        assert_eq!(tabs[0].prev(&tabs), Tab::Playlists);
+    }
+}
+
+#[cfg(test)]
+mod plugin_ui_tests {
+    use crate::client::tui::app::App;
+    use crate::client::tui::conn::Daemon;
+    use crate::proto::PluginLine;
+
+    fn line() -> PluginLine {
+        serde_json::from_value(serde_json::json!({
+            "spans": [{"text": "行", "style": "base"}],
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn 选中行以插件声明为准_未声明沿用并夹紧() {
+        let mut app = App::new(Daemon::detached());
+        // 插件声明选中画布行 3
+        app.apply_plugin_view("p", vec![line(); 8], Some(3));
+        assert_eq!(app.plugin_uis["p"].selected, 3);
+
+        // 未声明：沿用旧值
+        app.apply_plugin_view("p", vec![line(); 8], None);
+        assert_eq!(app.plugin_uis["p"].selected, 3);
+
+        // 视图缩短：夹紧到末行
+        app.apply_plugin_view("p", vec![line()], None);
+        assert_eq!(app.plugin_uis["p"].selected, 0);
+    }
 }

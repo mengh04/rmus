@@ -1,0 +1,12 @@
+[package]
+name = "hello-plugin"
+version = "0.1.0"
+edition = "2024"
+description = "rmus wasm 插件 POC：验证 load/update/render 往返"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+rmus-plugin-sdk = { path = "../plugin-sdk" }

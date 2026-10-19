@@ -16,16 +16,16 @@
 mod actions;
 mod command;
 mod input;
-mod online;
 mod palette;
 mod picker;
+mod plugins;
 mod search;
 mod selection;
 mod state;
 
 pub use state::{
-    AsyncReply, CandidatePicker, CmdPalette, DownloadState, DownloadStatus,
-    InputPurpose, Message, Mode, OnlineSong, OnlineState, PluginInfo, SearchMode, SearchState, Tab,
+    CandidatePicker, CmdPalette, InputPurpose, Message, Mode, PluginInfo, PluginUi, SearchMode,
+    SearchState, Tab,
 };
 
 use super::conn::{Daemon, Feed};
@@ -35,7 +35,6 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use state::parse_tracks;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::mpsc::{Sender, channel};
 
 pub struct App {
     pub daemon: Daemon,
@@ -51,17 +50,16 @@ pub struct App {
     pub playlists: Vec<String>,
     pub current_playlist: Option<String>,
 
-    // 在线（插件）状态
+    // 插件状态
     pub plugins: Vec<PluginInfo>,
-    /// 提供在线搜索/下载的插件（第一个带 search + download 方法的）
-    pub online_plugin: Option<PluginInfo>,
-    pub online: Option<OnlineState>,
-    /// 在途/已完成的下载，按 daemon 分配的任务号索引
-    pub downloads: HashMap<u64, DownloadState>,
-    /// 后台请求（在线搜索）的回执；gen 防止过期结果覆盖新查询
-    replies_tx: Sender<AsyncReply>,
-    replies: std::sync::mpsc::Receiver<AsyncReply>,
-    search_generation: u64,
+    /// 各插件画布的本地状态（视图缓存/选中/滚动），按插件名分槽——
+    /// 注册了 tab 的插件与「插件」面板的画布都在这里
+    pub plugin_uis: HashMap<String, PluginUi>,
+    /// 「插件」面板的画布提供者（第一个未注册 tab 的 UI 插件，如 demo）
+    pub panel_ui_plugin: Option<String>,
+    /// 终端内容区尺寸（ui 层每帧更新；发 PluginKey/ViewReq 时带给 daemon）
+    pub viewport: (u16, u16),
+
 
     // 每个列表的选中下标（列表空时为 0，渲染时注意 len==0）
     pub queue_selected: usize,
@@ -77,7 +75,6 @@ pub struct App {
     pub scroll_queue: usize,
     pub scroll_library: usize,
     pub scroll_playlists: usize,
-    pub scroll_online: usize,
     pub help_scroll: usize,
     // 首次载入后把选中项定位到正在播放的曲目/歌单，之后不再抢焦点
     seeded_queue: bool,
@@ -139,7 +136,7 @@ pub struct VisualSel {
 }
 impl App {
     pub fn new(daemon: Daemon) -> Self {
-        let (replies_tx, replies) = channel();
+
         Self {
             daemon,
             mode: Mode::Normal,
@@ -151,12 +148,9 @@ impl App {
             playlists: Vec::new(),
             current_playlist: None,
             plugins: Vec::new(),
-            online_plugin: None,
-            online: None,
-            downloads: HashMap::new(),
-            replies_tx,
-            replies,
-            search_generation: 0,
+            plugin_uis: HashMap::new(),
+            panel_ui_plugin: None,
+            viewport: (80, 24),
             queue_selected: 0,
             library_selected: 0,
             playlists_selected: 0,
@@ -167,7 +161,6 @@ impl App {
             scroll_queue: 0,
             scroll_library: 0,
             scroll_playlists: 0,
-            scroll_online: 0,
             help_scroll: 0,
             seeded_queue: false,
             seeded_playlists: false,
@@ -210,6 +203,7 @@ impl App {
             Mode::Search => self.handle_search_key(key),
             Mode::Command => self.handle_palette_key(key),
             Mode::Picker => self.handle_picker_key(key),
+            Mode::Plugin => self.handle_plugin_key(key),
             Mode::Normal => {
                 // 帮助浮层打开时，j/k/g/G 只滚帮助，不动列表选中项
                 if self.help_open
@@ -220,9 +214,31 @@ impl App {
                 }
                 // 数字键切 tab（1 起始），其余交给键位表
                 if let (KeyModifiers::NONE, KeyCode::Char(c)) = (key.modifiers, key.code)
-                    && let Some(action) = keymap::resolve_digit(c, Tab::ALL.len())
+                    && let Some(action) = keymap::resolve_digit(c, self.visible_tabs().len())
                 {
                     self.execute(action);
+                    return;
+                }
+                // 插件视图：`i` 进入按键直通（vim 习惯），全局键不被劫持
+                if self.tab == Tab::Plugins
+                    && matches!(
+                        (key.modifiers, key.code),
+                        (KeyModifiers::NONE, KeyCode::Char('i'))
+                    )
+                {
+                    self.mode = Mode::Plugin;
+                    self.notify("-- 插件直通 -- Enter/空格 转发 · Esc 退出", false);
+                    return;
+                }
+                // 插件画布：`r` 重新拉一次视图（比如插件刚重启）
+                if self.tab_is_plugin_canvas()
+                    && matches!(
+                        (key.modifiers, key.code),
+                        (KeyModifiers::NONE, KeyCode::Char('r'))
+                    )
+                    && let Some(plugin) = self.plugin_of_tab(&self.tab)
+                {
+                    self.request_view(&plugin);
                     return;
                 }
                 // visual 选段：操作键立即生效，移动键照常（选段跟着光标走）
@@ -362,42 +378,73 @@ impl App {
     }
 
     /// 取走 daemon 推送并转化成刷新标记；顺带收取后台请求的回执。
-    pub fn pump_events(&mut self) {
-        for feed in self.daemon.try_drain() {
-            match feed {
-                Feed::Daemon(Event::Position { position_ms }) => {
-                    // 高频事件：原地更新，不触发请求
-                    if let Some(status) = &mut self.status {
-                        status.position_ms = position_ms;
-                    }
-                }
-                Feed::Daemon(Event::QueueChanged) => {
-                    self.need_queue = true;
-                    self.need_status = true;
-                }
-                Feed::Daemon(
-                    Event::StateChanged { .. }
-                    | Event::SongChanged { .. }
-                    | Event::VolumeChanged { .. }
-                    | Event::ModeChanged { .. },
-                ) => self.need_status = true,
-                Feed::Daemon(Event::Plugin { plugin, call, data }) => {
-                    self.apply_plugin_event(&plugin, call, &data);
-                }
-                Feed::Disconnected => {
-                    self.fatal = Some("与 rmusd 失去连接".into());
+    /// daemon 推送落地（主循环每收到一条调一次）。
+    pub fn handle_feed(&mut self, feed: Feed) {
+        match feed {
+            Feed::Daemon(Event::Position { position_ms }) => {
+                // 高频事件：原地更新，不触发请求
+                if let Some(status) = &mut self.status {
+                    status.position_ms = position_ms;
                 }
             }
-        }
-        // 后台线程的搜索回执（过期的直接丢）
-        while let Ok(reply) = self.replies.try_recv() {
-            match reply {
-                AsyncReply::OnlineSearch { generation, query, result } if generation == self.search_generation => {
-                    self.apply_online_search(&query, result);
-                }
-                AsyncReply::OnlineSearch { .. } => {}
+            Feed::Daemon(Event::QueueChanged) => {
+                self.need_queue = true;
+                self.need_status = true;
+            }
+            Feed::Daemon(
+                Event::StateChanged { .. }
+                | Event::SongChanged { .. }
+                | Event::VolumeChanged { .. }
+                | Event::ModeChanged { .. },
+            ) => self.need_status = true,
+            Feed::Daemon(Event::PluginView { plugin, lines, selected }) => {
+                self.apply_plugin_view(&plugin, lines, selected);
+            }
+            // 下载进度/done 事件仍会广播；在线 tab 画布只消费
+            // rmus-dl 自己的 PluginView，这里直接忽略
+            Feed::Daemon(Event::Plugin { .. }) => {}
+            Feed::Disconnected => {
+                self.fatal = Some("与 rmusd 失去连接".into());
             }
         }
+    }
+
+    /// 终端 resize：更新插件画布视口并让当前 tab 的插件按新尺寸重渲染
+    /// （核心 tab 的布局是渲染时自适应的，不用刷新数据）。
+    pub fn on_resize(&mut self, cols: u16, rows: u16) {
+        self.viewport = (cols, rows);
+        if let Some(plugin) = self.plugin_of_tab(&self.tab) {
+            self.request_view(&plugin);
+        }
+    }
+
+    /// 当前 tab 栏（插件注册的 tab 随清单动态增减）。
+    pub fn visible_tabs(&self) -> Vec<Tab> {
+        Tab::visible(&self.plugins)
+    }
+
+    /// 当前 tab 的内容插件（Plugin tab = 注册者；「插件」面板 = demo 型
+    /// 插件；核心 tab = None）。
+    pub fn plugin_of_tab(&self, tab: &Tab) -> Option<String> {
+        match tab {
+            Tab::Plugin(pt) => Some(pt.plugin.clone()),
+            Tab::Plugins => self.panel_ui_plugin.clone(),
+            _ => None,
+        }
+    }
+
+    /// 当前 tab 的插件画布状态（只读）。
+    pub fn tab_ui(&self, tab: &Tab) -> Option<&PluginUi> {
+        self.plugin_of_tab(tab)
+            .and_then(|name| self.plugin_uis.get(&name))
+    }
+
+    /// 某插件是否满足在线约定（search + download）——`/` 搜索与
+    /// Enter 下载语义的判定依据。
+    pub fn supports_online(&self, plugin: &str) -> bool {
+        self.plugins
+            .iter()
+            .any(|p| p.name == plugin && p.supports_online())
     }
 
     /// 主循环每轮调用：按标记拉取 daemon 状态。
@@ -442,7 +489,19 @@ impl App {
                 self.plugins =
                     serde_json::from_value(value.get("plugins").cloned().unwrap_or_default())
                         .unwrap_or_default();
-                self.online_plugin = self.plugins.iter().find(|p| p.supports_online()).cloned();
+                // 「插件」面板画布 = 第一个未注册 tab 的 UI 插件（demo 型）。
+                // 注册了 tab 的插件由 Tab::Plugin(PluginTab) 直接寻址，
+                // 不需要单独字段。
+                self.panel_ui_plugin = self
+                    .plugins
+                    .iter()
+                    .find(|p| p.ui && p.tab.is_none())
+                    .map(|p| p.name.clone());
+                // 插件卸载会让当前 tab 从栏上消失（停在对应 tab 时）——
+                // 回退到队列，避免悬空 tab
+                if !self.visible_tabs().contains(&self.tab) {
+                    self.tab = Tab::Queue;
+                }
             }
         }
     }

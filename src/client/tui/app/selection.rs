@@ -12,11 +12,23 @@ impl App {
             Tab::Queue => self.queue.len(),
             Tab::Library => self.library.len(),
             Tab::Playlists => self.playlists.len(),
-            Tab::Online => self.online.as_ref().map_or(0, |o| o.songs.len()),
+            Tab::Plugin(_) | Tab::Plugins => {
+                self.tab_ui(&self.tab).map_or(0, |ui| ui.view.len())
+            }
         }
     }
 
     pub(super) fn move_selection(&mut self, delta: i32) {
+        // 插件画布：选中态在插件侧，导航键直接转发
+        if matches!(self.tab, Tab::Plugin(_)) {
+            let kind = if delta < 0 {
+                crate::proto::plugin_key::KIND_UP
+            } else {
+                crate::proto::plugin_key::KIND_DOWN
+            };
+            self.send_tab_key(kind, 0);
+            return;
+        }
         let len = self.active_len();
         if len == 0 {
             return;
@@ -25,7 +37,9 @@ impl App {
             Tab::Queue => self.queue_selected,
             Tab::Library => self.library_selected,
             Tab::Playlists => self.playlists_selected,
-            Tab::Online => self.online.as_ref().map_or(0, |o| o.selected),
+            Tab::Plugin(_) | Tab::Plugins => {
+                self.tab_ui(&self.tab).map_or(0, |ui| ui.selected)
+            }
         };
         let next = (base as i32 + delta).clamp(0, len as i32 - 1) as usize;
         self.set_selection(next);
@@ -38,9 +52,12 @@ impl App {
             Tab::Queue => self.queue_selected = index,
             Tab::Library => self.library_selected = index,
             Tab::Playlists => self.playlists_selected = index,
-            Tab::Online => {
-                if let Some(online) = &mut self.online {
-                    online.selected = index;
+            Tab::Plugin(_) | Tab::Plugins => {
+                if let Some(ui) = self
+                    .plugin_of_tab(&self.tab)
+                    .and_then(|name| self.plugin_uis.get_mut(&name))
+                {
+                    ui.selected = index;
                 }
             }
         }
@@ -68,8 +85,25 @@ impl App {
                     self.need_queue = true;
                 }
             }
-            // 在线视图：下载选中曲目，完成后自动试听
-            Tab::Online => self.download_selected(true),
+            // 插件画布：Enter 转发内容插件——满足在线约定的发 'd'（在
+            // 插件侧发起下载），其余发 KEY_ENTER
+            Tab::Plugin(_) | Tab::Plugins => {
+                let Some(plugin) = self.plugin_of_tab(&self.tab) else {
+                    return;
+                };
+                let (kind, payload) = if self.supports_online(&plugin) {
+                    (crate::proto::plugin_key::KIND_CHAR, 'd' as i32)
+                } else {
+                    (crate::proto::plugin_key::KIND_ENTER, 0)
+                };
+                let (cols, rows) = self.viewport;
+                self.simple(Request::PluginKey {
+                    plugin,
+                    key: crate::proto::plugin_key::encode(kind, payload),
+                    rows,
+                    cols,
+                });
+            }
         }
     }
 
@@ -92,8 +126,7 @@ impl App {
                 self.need_playlists = true;
                 self.notify(format!("已删除播放列表 “{name}”"), false);
             }
-            Tab::Library => {}
-            Tab::Online => {}
+            Tab::Library | Tab::Plugin(_) | Tab::Plugins => {}
         }
     }
 
@@ -156,7 +189,7 @@ impl App {
             Tab::Queue => (self.queue_selected, self.queue.len()),
             Tab::Library => (self.library_selected, self.library.len()),
             Tab::Playlists => (self.playlists_selected, self.playlists.len()),
-            Tab::Online => return None,
+            Tab::Plugin(_) | Tab::Plugins => return None,
         };
         if len == 0 {
             return None;
@@ -182,7 +215,7 @@ impl App {
             Tab::Queue => self.queue_selected,
             Tab::Library => self.library_selected,
             Tab::Playlists => self.playlists_selected,
-            Tab::Online => return,
+            Tab::Plugin(_) | Tab::Plugins => return,
         };
         self.visual = Some(VisualSel { anchor: cursor });
         self.set_selection(v.anchor);
@@ -206,7 +239,7 @@ impl App {
                 self.need_playlists = true;
             }
             Tab::Library => self.notify("音乐库不能删", true),
-            Tab::Online => {}
+            Tab::Plugin(_) | Tab::Plugins => {}
         }
         self.exit_visual();
     }
@@ -228,7 +261,7 @@ impl App {
         let (registered, n) = match self.tab {
             Tab::Queue => (yank(&self.queue), end - start + 1),
             Tab::Library => (yank(&self.library), end - start + 1),
-            Tab::Playlists | Tab::Online => (None, 0),
+            Tab::Playlists | Tab::Plugin(_) | Tab::Plugins => (None, 0),
         };
         if let Some(items) = registered {
             self.register = Some(items);
@@ -295,7 +328,7 @@ impl App {
                 self.notify(format!("已剪切 {title}（p 粘贴）"), false);
             }
             Tab::Playlists => self.remove_selected(),
-            Tab::Library | Tab::Online => {}
+            Tab::Library | Tab::Plugin(_) | Tab::Plugins => {}
         }
     }
 
@@ -332,7 +365,7 @@ impl App {
                     self.notify_marked(self.playlist_marks.len());
                 }
             }
-            Tab::Online => {}
+            Tab::Plugin(_) | Tab::Plugins => {}
         }
     }
 
@@ -347,7 +380,7 @@ impl App {
             Tab::Queue => self.queue_marks.clear(),
             Tab::Library => self.library_marks.clear(),
             Tab::Playlists => self.playlist_marks.clear(),
-            Tab::Online => {}
+            Tab::Plugin(_) | Tab::Plugins => {}
         }
         if had {
             self.notify("标记已清空", false);
@@ -360,7 +393,7 @@ impl App {
             Tab::Queue => !self.queue_marks.is_empty(),
             Tab::Library => !self.library_marks.is_empty(),
             Tab::Playlists => !self.playlist_marks.is_empty(),
-            Tab::Online => false,
+            Tab::Plugin(_) | Tab::Plugins => false,
         }
     }
 
@@ -413,7 +446,7 @@ impl App {
                 self.playlist_marks.clear();
             }
             Tab::Library => self.notify("音乐库不能删", true),
-            Tab::Online => {}
+            Tab::Plugin(_) | Tab::Plugins => {}
         }
     }
 
@@ -434,7 +467,7 @@ impl App {
         let (n, picked) = match self.tab {
             Tab::Queue => yank(&self.queue, &self.queue_marks),
             Tab::Library => yank(&self.library, &self.library_marks),
-            Tab::Playlists | Tab::Online => return,
+            Tab::Playlists | Tab::Plugin(_) | Tab::Plugins => return,
         };
         if n == 0 {
             self.notify("还没有标记（按 m 标记）", true);
@@ -455,7 +488,7 @@ impl App {
                 .library
                 .get(self.library_selected)
                 .map(|t| (t.path.clone(), t.title.clone())),
-            Tab::Playlists | Tab::Online => None,
+            Tab::Playlists | Tab::Plugin(_) | Tab::Plugins => None,
         };
         match yanked {
             Some((path, title)) => {
@@ -511,9 +544,6 @@ impl App {
         clamp(&mut self.queue_selected, self.queue.len());
         clamp(&mut self.library_selected, self.library.len());
         clamp(&mut self.playlists_selected, self.playlists.len());
-        if let Some(online) = &mut self.online {
-            clamp(&mut online.selected, online.songs.len());
-        }
     }
 
     /// 队列第一次到手时，把光标停在正在播放的那首上。

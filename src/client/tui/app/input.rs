@@ -105,8 +105,10 @@ impl App {
                 self.need_playlists = true;
                 self.notify(format!("已创建空播放列表 “{name}”"), false);
             }
-            InputPurpose::OnlineSearch => {
-                self.run_online_search(text);
+            InputPurpose::PluginSearch(plugin) => {
+                // 搜索交给内容插件：worker 跑 search，结果经 PluginView
+                // 回注画布（TUI 不做任何在线请求）
+                self.submit_search(&plugin, text);
             }
         }
     }

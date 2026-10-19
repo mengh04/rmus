@@ -33,27 +33,78 @@ pub fn run(socket: Option<PathBuf>, no_spawn: bool) -> Result<()> {
     result
 }
 
-/// 主循环：键盘事件 + daemon 推送 -> app 状态 -> 渲染。
-fn event_loop(terminal: &mut ratatui::DefaultTerminal, conn: conn::Daemon) -> Result<()> {
-    use crossterm::event::{Event as TermEvent, KeyEventKind, poll, read};
-    use std::time::Duration;
+/// 主循环事件源（统一队列：键盘 / resize / daemon 推送，谁到处理谁）。
+enum UiEvent {
+    Key(crossterm::event::KeyEvent),
+    Resize(u16, u16),
+    Feed(conn::Feed),
+}
 
+/// 主循环：事件驱动（无轮询）——键盘与 daemon 推送各占一个读取线程，
+/// 汇入同一 channel；`recv` 阻塞等任意源，事件到达即刻处理并重绘。
+/// 无事件时零唤醒（进度等周期刷新由 daemon 的推送驱动）。
+fn event_loop(terminal: &mut ratatui::DefaultTerminal, mut conn: conn::Daemon) -> Result<()> {
+    use crossterm::event::{Event as TermEvent, KeyEventKind, read};
+    use std::sync::mpsc::channel;
+    use std::thread;
+
+    let feeds = conn.take_feeds();
     let mut app = app::App::new(conn);
     app.startup();
     let mut title: Option<String> = None;
 
+    let (tx, rx) = channel::<UiEvent>();
+    // 键盘/resize：阻塞 read（crossterm 官方支持的跨线程用法），
+    // 程序退出后本线程随进程消亡
+    {
+        let tx = tx.clone();
+        thread::Builder::new()
+            .name("rmus-input".into())
+            .spawn(move || loop {
+                match read() {
+                    Ok(TermEvent::Key(key)) => {
+                        if key.kind == KeyEventKind::Press
+                            && tx.send(UiEvent::Key(key)).is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Ok(TermEvent::Resize(cols, rows)) => {
+                        if tx.send(UiEvent::Resize(cols, rows)).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            })?;
+    }
+    // daemon 推送转发：feeds 耗尽（events 线程退出）即断连
+    {
+        let tx = tx.clone();
+        thread::Builder::new()
+            .name("rmus-feed-fwd".into())
+            .spawn(move || {
+                for feed in feeds {
+                    if tx.send(UiEvent::Feed(feed)).is_err() {
+                        return;
+                    }
+                }
+                let _ = tx.send(UiEvent::Feed(conn::Feed::Disconnected));
+            })?;
+    }
+    drop(tx);
+
+    // 首帧立即画（否则要等第一条推送才见画面）
+    terminal.draw(|frame| ui::draw(frame, &mut app))?;
+
     loop {
-        // 键盘输入（100ms 轮询窗口，期间也能让出 CPU）
-        if poll(Duration::from_millis(100))?
-            && let TermEvent::Key(key) = read()?
-            && key.kind == KeyEventKind::Press
-        {
-            app.handle_key(key);
+        let ev = rx.recv()?;
+        match ev {
+            UiEvent::Key(key) => app.handle_key(key),
+            UiEvent::Resize(cols, rows) => app.on_resize(cols, rows),
+            UiEvent::Feed(feed) => app.handle_feed(feed),
         }
-        // daemon 推送（非阻塞取空队列）
-        app.pump_events();
-        // 按需向 daemon 拉取最新状态
-        app.refresh_if_needed();
 
         if app.should_quit {
             return Ok(());
@@ -61,7 +112,8 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, conn: conn::Daemon) -> Re
         if let Some(fatal) = app.take_fatal() {
             anyhow::bail!("{fatal}");
         }
-
+        // 按需向 daemon 拉取最新状态（触发条件由推送置位）
+        app.refresh_if_needed();
         terminal.draw(|frame| ui::draw(frame, &mut app))?;
         sync_title(&mut title, &app);
     }

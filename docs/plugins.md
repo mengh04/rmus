@@ -35,6 +35,11 @@ rmusd 的插件是**进程外的独立可执行文件**：宿主与插件之间�
 - `kind: "call"`：短调用，宿主等响应，30s 超时
 - `kind: "task"`：长任务，宿主立即向客户端回 `{"call":N}`；`N` 是宿主内
   部请求 id，进度通知与完成事件都用它关联
+- `ui: true`（wasm 插件）：实现 `update`/`render` export，宿主提供按键
+  注入（PluginKey）与视图推送（Event::PluginView）通道
+- `tab: "在线"`（可选，UI 插件）：向 TUI 注册一个 tab 位；**没有插件声明
+  时 tab 栏不出现该项**。在线页的提供者还须满足下文的 search/download
+  约定（声明是注册动作，约定是能力匹配，缺一不可）
 
 ## 会话
 
@@ -61,9 +66,12 @@ rmusd 的插件是**进程外的独立可执行文件**：宿主与插件之间�
 - 通知行的 `call` 关联到产生它的那个请求 id；与请求无关的通知可省略
 - 会话生命周期：懒启动、无在途请求且 10 分钟无活动即回收、宿主退出时 kill
 
-## 在线音乐源约定（TUI 在线 tab / `rmus dl`）
+## 在线音乐源约定（TUI 在线 tab）
 
-TUI 寻找第一个同时宣告 `search` + `download` 的插件，并按以下形状调用。
+在线 tab 由插件注册（manifest `tab: "在线"`）；TUI 在其中挑第一个同时
+宣告 `search` + `download` 且注册了该 tab 的 UI 插件作为内容提供者，
+按以下形状调用。挪走插件，tab 一起消失。（rmus 不再有命令行下载入口；
+rmus-dl 从立项起就是 rmus 的插件，搜索/下载都发生在 TUI 的插件画布里。）
 
 ### search（call）
 
@@ -122,12 +130,24 @@ kugou 搜索期给不出（下载时查 songinfo 补齐）。客户端据此在�
 事件 `{"event":"plugin","data":{plugin, call, data}}`：插件通知原样透传 +
 宿主包装的 done/failed。
 
+## 插件 UI 画布（wasm 插件）
+
+UI 插件（manifest `ui: true`）实现 `update(event)` / `render(rows, cols)`
+export，宿主经 `print_spans` 收渲染行（流式多段、语义样式令牌）。
+SDK（`rmus_plugin_sdk::ui`）提供：
+
+- 样式令牌：`base` / `strong` / `faint` / `accent` / `danger` / `ok`
+  （含 `ok_bold`）/ `danger_bold` / `cool` / `rule`——宿主映射到当前
+  主题，插件 UI 自动跟随配色
+- 列布局原语：`columns(width)`（与 TUI 队列/音乐库同款的列计算）、
+  `fit` / `pad_left` / `pad_right`（按显示宽度截断与填充，中文对齐
+  与宿主一致）。画布行是流式排列，多列表格 = 每段 pad 到列定宽后
+  顺序拼接
+- 事件编码：`event::encode(kind, payload)`，kind 表 DATA/CHAR/UP/DOWN
+  等；长任务经 `task::spawn`（后台 worker），事件经 `KIND_DATA` 回注
+
 ## 模拟与预览
 
-`.preview/fake_daemon.py` 内置了一个假 `dl` 插件（秒回搜索、6 秒模拟下载），
-配合 `preview.sh` 可在无声卡、无网络环境渲染在线 tab 的所有状态：
-
-```
-./.preview/preview.sh normal 4 / 稻香 Enter          # 搜索结果
-./.preview/preview.sh normal 4 / 稻香 Enter d sleep:2.8   # 下载进行中（50%）
-```
+> TODO：`.preview/` 的 fake_daemon 驱动的是旧内嵌在线 UI（Event::Plugin
+> 进度直驱），画布改插件渲染后已过时；插件画布的离线预览需要假 daemon
+> 支持 PluginData/PluginView 通道，待补。

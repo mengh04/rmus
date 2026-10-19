@@ -55,7 +55,16 @@ pub struct PluginManifest {
     /// 插件名（客户端用它寻址，如 `"dl"`）；限 `[a-z0-9-]`
     pub name: String,
     pub version: String,
+    #[serde(default)]
     pub methods: Vec<PluginMethod>,
+    /// UI 插件：wasm 实现，宿主提供按键注入（PluginKey）与视图推送
+    /// （Event::PluginView）通道；methods 为空
+    #[serde(default)]
+    pub ui: bool,
+    /// 插件注册的 TUI tab 标题（如 `"在线"`）；None = 不占 tab 位
+    /// （只在「插件」清单里出现）。tab 栏随插件装卸动态增减。
+    #[serde(default)]
+    pub tab: Option<String>,
 }
 
 impl PluginManifest {

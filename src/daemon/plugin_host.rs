@@ -11,7 +11,7 @@
 
 use anyhow::Context;
 use rmus::plugin::{self, MethodKind, PluginManifest, PluginNotify, PluginReply};
-use rmus::proto::Event;
+use rmus::proto::{Event, PluginLine};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,11 +19,14 @@ use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinSet;
+use wasm_host::Plugin as WasmPlugin;
 
 /// 已发现的一个插件。
 struct Discovered {
     manifest: PluginManifest,
     path: PathBuf,
+    /// wasm 插件（wasm 会话）；false = 进程外可执行（NDJSON 会话）
+    wasm: bool,
 }
 
 /// 插件宿主（廉价克隆，内部共享）。
@@ -34,7 +37,44 @@ struct Inner {
     plugins: Vec<Discovered>,
     /// 会话表单独 Arc：stdout 读任务退出时要回来摘除自己
     sessions: Arc<tokio::sync::Mutex<HashMap<String, Arc<Session>>>>,
+    /// wasm 插件会话表：wasmi 实例独占线程，消息经 channel 注入
+    wasm_sessions: Mutex<HashMap<String, WasmSession>>,
     events_tx: broadcast::Sender<Event>,
+}
+
+/// wasm 插件会话的一帧输入：UI 按键、方法调用。（取消不进通道——
+/// 插件线程阻塞在长任务里收不到，经 [`wasm_host::CancelHandle`] 直通。）
+enum WasmMsg {
+    Key {
+        key: i32,
+        rows: u16,
+        cols: u16,
+        /// 跳过 update 直接 render（`PluginViewReq` 的视图刷新）
+        force_render: bool,
+    },
+    Call {
+        method: String,
+        params: serde_json::Value,
+        call_id: u64,
+        task: bool,
+        reply: oneshot::Sender<Result<serde_json::Value, String>>,
+    },
+    /// 后台任务事件（worker 实例的进度/done/failed）：JSON 行。UI 线程
+    /// 写进 `set_last_event` 并以 `KIND_DATA` 事件通知插件
+    Data { json: String },
+}
+
+/// wasm 插件会话：wasmi 实例独占一个线程，保证单线程同步模型（Zellij
+/// 同款假设——事件顺序由宿主单一消费点保证）。UI 视图与通知经
+/// `Event::PluginView` / `Event::Plugin` 广播；方法回包走 oneshot。
+struct WasmSession {
+    tx: std::sync::mpsc::Sender<WasmMsg>,
+    /// 取消标记直通：插件线程阻塞在长任务里收不到 channel 消息，
+    /// 取消必须绕过 channel 直接写共享集合（插件自查生效）
+    cancels: wasm_host::CancelHandle,
+    next_id: AtomicU64,
+    /// 只用于退出时判存活（std 线程无法 kill；靠 drop tx 让线程自然退出）
+    _join: std::thread::JoinHandle<()>,
 }
 
 /// 挂起的请求：短调用等回执，长任务只等事件。
@@ -70,6 +110,8 @@ impl Session {
 
 impl PluginHost {
     /// 扫描插件目录并逐个握手。失败/不合规的候选静默跳过（stderr 留痕）。
+    /// `.wasm` 文件走 wasm 握手（实例化 + manifest export），其余按可执行
+    /// 文件处理（`--rmus-manifest` 子进程握手）。
     pub async fn discover(events_tx: broadcast::Sender<Event>) -> Self {
         let mut candidates: Vec<PathBuf> = Vec::new();
         for dir in plugin::plugin_dirs() {
@@ -78,15 +120,24 @@ impl PluginHost {
             };
             for entry in entries.flatten() {
                 let path = entry.path();
-                if is_executable_file(&path) {
+                if path.extension().is_some_and(|e| e == "wasm") || is_executable_file(&path) {
                     candidates.push(path);
                 }
             }
         }
 
-        let mut handles = JoinSet::new();
+        let mut handles: JoinSet<anyhow::Result<Option<Discovered>>> = JoinSet::new();
         for path in candidates {
-            handles.spawn(async move { handshake(path).await });
+            if path.extension().is_some_and(|e| e == "wasm") {
+                // wasm 握手是同步 CPU 工作，丢阻塞线程池
+                handles.spawn(async move {
+                    tokio::task::spawn_blocking(move || wasm_handshake(path))
+                        .await
+                        .unwrap_or_else(|e| Err(anyhow::anyhow!("join: {e}")))
+                });
+            } else {
+                handles.spawn(async move { handshake(path).await });
+            }
         }
         let mut plugins: Vec<Discovered> = Vec::new();
         while let Some(joined) = handles.join_next().await {
@@ -117,7 +168,8 @@ impl PluginHost {
                     );
                     plugins.push(found);
                 }
-                Ok(Ok(None)) | Ok(Err(_)) => {}
+                Ok(Ok(None)) => {}
+                Ok(Err(e)) => eprintln!("[rmusd] 插件握手失败: {e:#}"),
                 Err(e) => eprintln!("[rmusd] 插件握手任务异常: {e}"),
             }
         }
@@ -125,6 +177,7 @@ impl PluginHost {
         let host = Self(Arc::new(Inner {
             plugins,
             sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            wasm_sessions: Mutex::new(HashMap::new()),
             events_tx,
         }));
         tokio::spawn(reaper(host.clone()));
@@ -137,8 +190,66 @@ impl PluginHost {
             "plugins": self.0.plugins.iter().map(|d| serde_json::json!({
                 "name": d.manifest.name,
                 "version": d.manifest.version,
+                "ui": d.manifest.ui,
+                "tab": d.manifest.tab,
                 "methods": d.manifest.methods,
             })).collect::<Vec<_>>()
+        })
+    }
+
+    /// 锁内取（或懒启动）wasm 会话并执行操作。call_id 分配也在锁内，
+    /// 保证并发调用不撞号。
+    fn with_wasm_session<T>(
+        &self,
+        name: &str,
+        f: impl FnOnce(&WasmSession) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut sessions = self.0.wasm_sessions.lock().unwrap();
+        if !sessions.contains_key(name) {
+            let found = self
+                .0
+                .plugins
+                .iter()
+                .find(|p| p.manifest.name == name)
+                .ok_or_else(|| format!("未知插件 “{name}”"))?;
+            if !found.wasm {
+                return Err(format!("插件 “{name}” 不是 wasm 插件"));
+            }
+            let session = spawn_wasm_session(name.to_string(), found.path.clone(), self.0.events_tx.clone())
+                .map_err(|e| e.to_string())?;
+            sessions.insert(name.to_string(), session);
+        }
+        f(sessions.get(name).unwrap())
+    }
+
+    /// UI 插件：注入数据（搜索关键词等）。插件以 `KIND_DATA` 事件收到。
+    pub fn send_ui_data(&self, name: &str, data: &serde_json::Value) -> Result<(), String> {
+        let json = serde_json::json!({ "data": data }).to_string();
+        self.with_wasm_session(name, |s| {
+            s.tx
+                .send(WasmMsg::Data { json })
+                .map_err(|_| "wasm 插件线程已退出".to_string())
+        })
+    }
+
+    /// UI 插件：注入按键（或 `force_render` 时直接刷新视图）。会话懒启动；
+    /// 视图经 `Event::PluginView` 广播，本调用只做投递确认。
+    pub fn send_ui_key(        &self,
+        name: &str,
+        key: i32,
+        rows: u16,
+        cols: u16,
+        force_render: bool,
+    ) -> Result<(), String> {
+        self.with_wasm_session(name, |s| {
+            s.tx
+                .send(WasmMsg::Key {
+                    key,
+                    rows,
+                    cols,
+                    force_render,
+                })
+                .map_err(|_| "wasm 插件线程已退出".to_string())
         })
     }
 
@@ -147,9 +258,70 @@ impl PluginHost {
         self.0.plugins.is_empty()
     }
 
-    /// 调用插件方法。短调用等响应；长任务立即返回 `{"call":N}`，
-    /// 结果随后以 `Event::Plugin`（done/failed）广播。
+    /// 调用插件方法。按插件类型分流：wasm 走实例线程，进程外走 NDJSON。
+    /// 短调用等响应；长任务立即返回 `{"call":N}`，结果随后以
+    /// `Event::Plugin`（done/failed）广播。
     pub async fn call(
+        &self,
+        name: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let is_wasm = self
+            .0
+            .plugins
+            .iter()
+            .find(|p| p.manifest.name == name)
+            .ok_or_else(|| format!("未知插件 “{name}”"))?
+            .wasm;
+        if is_wasm {
+            self.wasm_call(name, method, params).await
+        } else {
+            self.process_call(name, method, params).await
+        }
+    }
+
+    /// wasm 插件的方法调用。
+    async fn wasm_call(
+        &self,
+        name: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let task = self
+            .0
+            .plugins
+            .iter()
+            .find(|p| p.manifest.name == name)
+            .and_then(|p| p.manifest.method_kind(method))
+            == Some(MethodKind::Task);
+        let (call_id, rx) = self.with_wasm_session(name, |s| {
+            let call_id = s.next_id.fetch_add(1, Ordering::Relaxed);
+            let (reply, rx) = oneshot::channel();
+            s.tx
+                .send(WasmMsg::Call {
+                    method: method.to_string(),
+                    params,
+                    call_id,
+                    task,
+                    reply,
+                })
+                .map_err(|_| "wasm 插件线程已退出".to_string())?;
+            Ok((call_id, rx))
+        })?;
+
+        if task {
+            return Ok(serde_json::json!({"call": call_id}));
+        }
+        match tokio::time::timeout(plugin::CALL_TIMEOUT, rx).await {
+            Ok(Ok(reply)) => reply,
+            Ok(Err(_)) => Err("wasm 插件线程已中断".into()),
+            Err(_) => Err("插件响应超时".into()),
+        }
+    }
+
+    /// 进程外插件的方法调用（原 call 主体）。
+    async fn process_call(
         &self,
         name: &str,
         method: &str,
@@ -192,43 +364,61 @@ impl PluginHost {
         }
     }
 
-    /// 取消长任务。会话不存在 = 无事可做。
+    /// 取消长任务。按插件类型分流；wasm 插件标记取消集（插件循环自查）。
     pub async fn cancel(&self, name: &str, call: u64) -> Result<serde_json::Value, String> {
-        let existing = self.0.sessions.lock().await.get(name).cloned();
-        match existing {
-            None => Ok(serde_json::json!({"cancelled": false})),
-            Some(session) => {
-                let id = session.next_id.fetch_add(1, Ordering::Relaxed);
-                let (tx, rx) = oneshot::channel();
-                session.pending.lock().unwrap().insert(
-                    id,
-                    Pending {
-                        reply: tx,
-                        task: false,
-                    },
-                );
-                session.touch();
-                let line =
-                    serde_json::json!({"id": id, "method": "cancel", "params": {"call": call}})
-                        .to_string();
-                if session.stdin.send(line).await.is_err() {
-                    session.pending.lock().unwrap().remove(&id);
-                    return Err("插件进程已退出".into());
-                }
-                match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
-                    Ok(Ok(reply)) => reply,
-                    Ok(Err(_)) => Err("插件会话已中断".into()),
-                    Err(_) => {
-                        session.pending.lock().unwrap().remove(&id);
-                        Err("取消请求超时".into())
+        let found = self
+            .0
+            .plugins
+            .iter()
+            .find(|p| p.manifest.name == name);
+        match found {
+            Some(found) if found.wasm => {
+                // 无会话 = 无在途任务，标记也无害（乐观回）
+                self.with_wasm_session(name, |s| {
+                    s.cancels.cancel(call);
+                    Ok(())
+                })?;
+                Ok(serde_json::json!({"cancelled": true}))
+            }
+            Some(_) => {
+                let existing = self.0.sessions.lock().await.get(name).cloned();
+                match existing {
+                    None => Ok(serde_json::json!({"cancelled": false})),
+                    Some(session) => {
+                        let id = session.next_id.fetch_add(1, Ordering::Relaxed);
+                        let (tx, rx) = oneshot::channel();
+                        session.pending.lock().unwrap().insert(
+                            id,
+                            Pending {
+                                reply: tx,
+                                task: false,
+                            },
+                        );
+                        session.touch();
+                        let line = serde_json::json!({"id": id, "method": "cancel", "params": {"call": call}}).to_string();
+                        if session.stdin.send(line).await.is_err() {
+                            session.pending.lock().unwrap().remove(&id);
+                            return Err("插件进程已退出".into());
+                        }
+                        match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
+                            Ok(Ok(reply)) => reply,
+                            Ok(Err(_)) => Err("插件会话已中断".into()),
+                            Err(_) => {
+                                session.pending.lock().unwrap().remove(&id);
+                                Err("取消请求超时".into())
+                            }
+                        }
                     }
                 }
             }
+            None => Err(format!("未知插件 “{name}”")),
         }
     }
 
     /// 退出前清理：杀掉所有会话子进程（process::exit 不跑析构）。
     pub fn shutdown(&self) {
+        // wasm 会话：drop 发送端让线程在 rx.recv() 处自然退出
+        self.0.wasm_sessions.lock().unwrap().clear();
         if let Ok(sessions) = self.0.sessions.try_lock() {
             for (name, session) in sessions.iter() {
                 if let Ok(mut child) = session.child.lock() {
@@ -287,6 +477,204 @@ impl PluginHost {
         Ok(session)
     }
 }
+/// wasm 插件握手：实例化 → 读 manifest export → 校验。
+fn wasm_handshake(path: PathBuf) -> anyhow::Result<Option<Discovered>> {
+    let wasm = std::fs::read(&path).context("无法读取 wasm 文件")?;
+    let mut instance = WasmPlugin::new(&wasm, Box::new(|_, _| {})).context("实例化失败")?;
+    let manifest: PluginManifest =
+        serde_json::from_str(&instance.manifest().context("读取 manifest 失败")?)
+            .context("manifest 不是合法 JSON")?;
+    manifest
+        .validate()
+        .map_err(|e| anyhow::anyhow!("manifest 不合规（{}）: {e}", path.display()))?;
+    Ok(Some(Discovered {
+        manifest,
+        path,
+        wasm: true,
+    }))
+}
+
+/// wasm 插件会话线程：实例化后循环消费消息（按键 / 方法调用）。
+/// 方法执行的 notify 经 on_notify 实时转发为 `Event::Plugin`；长任务
+/// 完成包装成 done/failed 广播，短调用走 oneshot。实例化在调用线程完成
+/// （μs 级），CancelHandle 因此无竞态地带出给会话表。
+fn spawn_wasm_session(
+    name: String,
+    path: PathBuf,
+    events_tx: broadcast::Sender<Event>,
+) -> anyhow::Result<WasmSession> {
+    let (tx, rx) = std::sync::mpsc::channel::<WasmMsg>();
+    let wasm = std::fs::read(&path).context("无法读取 wasm 文件")?;
+    // notify → Event::Plugin 实时转发（进度等）
+    let notify_events = {
+        let events_tx = events_tx.clone();
+        let name = name.clone();
+        Box::new(move |call: Option<u64>, data: serde_json::Value| {
+            let _ = events_tx.send(Event::Plugin {
+                plugin: name.clone(),
+                call,
+                data,
+            });
+        })
+    };
+    let mut plugin = WasmPlugin::new(&wasm, notify_events).context("实例化失败")?;
+    plugin.set_lib_dir(rmus::library::root());
+    // 最近一次按键的视口（Data 事件重绘用；默认 24×80）
+    let mut viewport: u64 = ((24u64) << 16) | 80;
+    let cancels = plugin.cancel_handle();
+    // 后台任务源：插件经 spawn_task 发起时，宿主用同 wasm 的新实例跑，
+    // 事件经此桥接回 UI 线程（写 last_event + KIND_DATA 通知）
+    let worker_tx = tx.clone();
+    let worker_events: wasm_host::TaskEvents = Arc::new(move |json: String| {
+        let _ = worker_tx.send(WasmMsg::Data { json });
+    });
+    plugin.set_worker_source(path.clone(), worker_events);
+    let join = std::thread::Builder::new()
+        .name(format!("rmus-wasm-{name}"))
+        .spawn(move || {
+            let mut run = || -> anyhow::Result<()> {
+                while let Ok(msg) = rx.recv() {
+                    match msg {
+                        WasmMsg::Key {
+                            key,
+                            rows,
+                            cols,
+                            force_render,
+                        } => {
+                            viewport = ((rows as u64) << 16) | cols as u64;
+                            let redraw = if force_render {
+                                true
+                            } else {
+                                plugin.update(key).context("update 失败")?
+                            };
+                            if !redraw || rows == 0 || cols == 0 {
+                                continue; // 区域为空时跳过渲染，保留上次视图
+                            }
+                            let lines: Vec<PluginLine> = plugin
+                                .render(rows, cols)?
+                                .iter()
+                                .map(|line| PluginLine {
+                                    spans: line
+                                        .spans
+                                        .iter()
+                                        .map(|s| rmus::proto::PluginSpan {
+                                            text: s.text.clone(),
+                                            style: s.style.clone(),
+                                        })
+                                        .collect(),
+                                })
+                                .collect();
+                            let selected = plugin.take_selected();
+                            let _ = events_tx.send(Event::PluginView {
+                                plugin: name.clone(),
+                                lines,
+                                selected,
+                            });
+                        }
+                        WasmMsg::Call {
+                            method,
+                            params,
+                            call_id,
+                            task,
+                            reply,
+                        } => {
+                            plugin.set_current_call(Some(call_id));
+                            let outcome = plugin.call_method(&method, &params);
+                            plugin.set_current_call(None);
+                            match outcome {
+                                Ok(Ok(result)) => {
+                                    if task {
+                                        let _ = events_tx.send(Event::Plugin {
+                                            plugin: name.clone(),
+                                            call: Some(call_id),
+                                            data: serde_json::json!({
+                                                "event": "done", "result": result
+                                            }),
+                                        });
+                                    } else {
+                                        let _ = reply.send(Ok(result));
+                                    }
+                                }
+                                Ok(Err(error)) => {
+                                    if task {
+                                        let _ = events_tx.send(Event::Plugin {
+                                            plugin: name.clone(),
+                                            call: Some(call_id),
+                                            data: serde_json::json!({
+                                                "event": "failed", "error": error
+                                            }),
+                                        });
+                                    } else {
+                                        let _ = reply.send(Err(error));
+                                    }
+                                }
+                                Err(error) => {
+                                    let error = error.to_string();
+                                    if task {
+                                        let _ = events_tx.send(Event::Plugin {
+                                            plugin: name.clone(),
+                                            call: Some(call_id),
+                                            data: serde_json::json!({
+                                                "event": "failed", "error": error
+                                            }),
+                                        });
+                                    } else {
+                                        let _ = reply.send(Err(error));
+                                    }
+                                }
+                            }
+                        }
+                        WasmMsg::Data { json } => {
+                            // 后台任务事件：写进 last_event 缓冲并以 KIND_DATA
+                            // 通知插件；任务期事件同时以 Event::Plugin 兼容广播
+                            let _ = events_tx.send(Event::Plugin {
+                                plugin: name.clone(),
+                                call: None,
+                                data: serde_json::from_str(&json)
+                                    .unwrap_or(serde_json::json!({"raw": json})),
+                            });
+                            plugin.set_last_event(json.as_bytes());
+                            if plugin.update(rmus::proto::plugin_key::KIND_DATA)? {
+                                let (rows, cols) = ((viewport >> 16) as u16, viewport as u16);
+                                let lines: Vec<PluginLine> = plugin
+                                    .render(rows, cols)?
+                                    .iter()
+                                    .map(|line| PluginLine {
+                                        spans: line
+                                            .spans
+                                            .iter()
+                                            .map(|s| rmus::proto::PluginSpan {
+                                                text: s.text.clone(),
+                                                style: s.style.clone(),
+                                            })
+                                            .collect(),
+                                    })
+                                    .collect();
+                                let selected = plugin.take_selected();
+                                let _ = events_tx.send(Event::PluginView {
+                                    plugin: name.clone(),
+                                    lines,
+                                    selected,
+                                });
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            };
+            if let Err(e) = run() {
+                eprintln!("[rmusd] wasm 插件 {name} 会话结束: {e:#}");
+            }
+        })
+        .expect("spawn wasm 插件线程");
+    Ok(WasmSession {
+        tx,
+        cancels,
+        next_id: AtomicU64::new(1),
+        _join: join,
+    })
+}
+
 /// 握手：以 `--rmus-manifest` 调用候选，解析第一行 JSON。
 async fn handshake(path: PathBuf) -> anyhow::Result<Option<Discovered>> {
     use std::process::Stdio;
@@ -311,7 +699,11 @@ async fn handshake(path: PathBuf) -> anyhow::Result<Option<Discovered>> {
     manifest.validate().map_err(|e| {
         anyhow::anyhow!("manifest 不合规（{}）: {e}", path.display())
     })?;
-    Ok(Some(Discovered { manifest, path }))
+    Ok(Some(Discovered {
+        manifest,
+        path,
+        wasm: false,
+    }))
 }
 
 /// 会话空闲回收：久无活动且无在途请求的会话杀掉。

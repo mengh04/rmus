@@ -54,8 +54,18 @@ pub fn draw(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             ("o", "对调"),
             ("Esc", "退出"),
         ]
+    } else if app.mode == Mode::Plugin {
+        // 按键直通：所有键进插件，Esc 出来
+        &[
+            ("任意键", "转发插件"),
+            ("Esc", "退出直通"),
+        ]
     } else {
-        keys_for(app.tab)
+        keys_for(
+            &app.tab,
+            app.plugin_of_tab(&app.tab)
+                .is_some_and(|p| app.supports_online(&p)),
+        )
     };
 
     frame.render_widget(
@@ -64,8 +74,8 @@ pub fn draw(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     );
 }
 
-/// 键位速览随当前视图变化。
-fn keys_for(tab: Tab) -> &'static [(&'static str, &'static str)] {
+/// 键位速览随当前视图变化（在线画布与否由内容插件能力决定）。
+fn keys_for(tab: &Tab, online: bool) -> &'static [(&'static str, &'static str)] {
     match tab {
         Tab::Queue => &[
             ("j/k", "移动"),
@@ -96,12 +106,24 @@ fn keys_for(tab: Tab) -> &'static [(&'static str, &'static str)] {
             (":", "命令"),
             ("?", "帮助"),
         ],
-        Tab::Online => &[
-            ("/", "搜索"),
+        // 插件画布：满足在线约定的给完整在线键位，否则给通用键位
+        Tab::Plugin(_) | Tab::Plugins if online => {
+            &[
+                ("/", "搜索"),
+                ("j/k", "移动"),
+                ("d", "下载"),
+                ("Enter", "下载"),
+                ("x", "取消"),
+                ("i", "直通"),
+                ("r", "刷新"),
+                ("?", "帮助"),
+            ]
+        }
+        Tab::Plugin(_) | Tab::Plugins => &[
             ("j/k", "移动"),
-            ("d", "下载"),
-            ("Enter", "下载+试听"),
-            ("x", "取消"),
+            ("i", "按键直通"),
+            ("Enter", "转发"),
+            ("r", "刷新"),
             ("?", "帮助"),
         ],
     }
@@ -130,18 +152,15 @@ fn stats_line(app: &App) -> String {
                 format!("{count} 个播放列表")
             }
         }
-        Tab::Online => {
-            use super::super::app::DownloadStatus;
-            let running = app
-                .downloads
-                .values()
-                .filter(|d| d.status == DownloadStatus::Running)
-                .count();
-            match (app.online.as_ref().map(|o| o.songs.len()).unwrap_or(0), running) {
-                (0, 0) => String::new(),
-                (results, 0) => format!("{results} 个结果"),
-                (0, _) => format!("下载中 {running}"),
-                (results, _) => format!("{results} 个结果 · 下载中 {running}"),
+        // 插件画布：底栏报选中位置（选中态在插件侧，TUI 只做窗口跟随）
+        Tab::Plugin(_) | Tab::Plugins => {
+            let (selected, count) = app
+                .tab_ui(&app.tab)
+                .map_or((0, 0), |ui| (ui.selected, ui.view.len()));
+            if count == 0 {
+                String::new()
+            } else {
+                format!("{}/{}", selected + 1, count)
             }
         }
     }

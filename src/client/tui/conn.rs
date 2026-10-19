@@ -21,7 +21,6 @@ pub enum Feed {
 pub struct Daemon {
     client: Client,
     feed_rx: Receiver<Feed>,
-    socket: Option<PathBuf>,
 }
 
 impl Daemon {
@@ -57,7 +56,6 @@ impl Daemon {
         Ok(Self {
             client,
             feed_rx,
-            socket,
         })
     }
 
@@ -66,24 +64,6 @@ impl Daemon {
         self.client.request(request)
     }
 
-    /// 后台线程里发请求（慢调用不阻塞主循环；一条连接一次请求）。
-    /// 返回该线程的回执通道。
-    pub fn spawn_request(
-        &self,
-        request: crate::proto::Request,
-    ) -> Receiver<anyhow::Result<serde_json::Value>> {
-        let (tx, rx) = channel();
-        let socket = self.socket.clone();
-        std::thread::Builder::new()
-            .name("rmus-async".into())
-            .spawn(move || {
-                let result =
-                    Client::connect(socket).and_then(|mut client| client.request(request));
-                let _ = tx.send(result);
-            })
-            .expect("启动后台请求线程");
-        rx
-    }
 
     /// 测试/预览用：不连 daemon 的空壳，只为让 UI 能拿到状态。
     #[cfg(test)]
@@ -93,16 +73,14 @@ impl Daemon {
         Self {
             client: Client::from_stream(client_end),
             feed_rx,
-            socket: None,
         }
     }
 
     /// 主循环用：非阻塞地取走当前积压的所有推送。
-    pub fn try_drain(&self) -> Vec<Feed> {
-        let mut feeds = Vec::new();
-        while let Ok(feed) = self.feed_rx.try_recv() {
-            feeds.push(feed);
-        }
-        feeds
+    /// 把推送接收端交给调用方（主循环的统一事件队列；之后 Daemon
+    /// 不再消费推送）。调用后原接收端为空 channel。
+    pub fn take_feeds(&mut self) -> Receiver<Feed> {
+        let (_, empty) = channel();
+        std::mem::replace(&mut self.feed_rx, empty)
     }
 }

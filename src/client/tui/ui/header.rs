@@ -50,13 +50,15 @@ fn left_line(app: &App, theme: &Theme, width: u16) -> Line<'static> {
     ];
     let mut used: u16 = 8;
 
-    for (i, tab) in Tab::ALL.iter().enumerate() {
-        let active = *tab == app.tab;
-        let count = match tab {
+    for (i, tab) in app.visible_tabs().into_iter().enumerate() {
+        let active = tab == app.tab;
+        let count = match &tab {
             Tab::Queue => app.queue.len(),
             Tab::Library => app.library.len(),
             Tab::Playlists => app.playlists.len(),
-            Tab::Online => app.online.as_ref().map_or(0, |o| o.songs.len()),
+            Tab::Plugin(_) | Tab::Plugins => {
+                app.tab_ui(&tab).map_or(0, |ui| ui.view.len())
+            }
         };
         let label = format!(" {} {} {} ", i + 1, tab.title(), count);
         let w = label.width() as u16;

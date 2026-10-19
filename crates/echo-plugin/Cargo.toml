@@ -1,0 +1,13 @@
+[package]
+name = "echo-plugin"
+version = "0.1.0"
+edition = "2024"
+description = "rmus wasm 方法插件 POC：假 search/download，验证 call/task/progress/cancel 链路"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+rmus-plugin-sdk = { path = "../plugin-sdk" }
+serde_json = "1"

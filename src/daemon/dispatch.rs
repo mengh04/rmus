@@ -70,6 +70,34 @@ pub(crate) async fn dispatch(
         return;
     }
 
+    // UI 插件：按键注入 / 视图刷新。投递即回（视图经 Event::PluginView 推送）。
+    if let Request::PluginKey {
+        plugin,
+        key,
+        rows,
+        cols,
+    } = msg.request
+    {
+        let result = plugins.send_ui_key(&plugin, key, rows, cols, false);
+        let json = serde_json::to_string(&ui_ack(id, result)).unwrap_or_default();
+        let _ = out_tx.send(json);
+        return;
+    }
+
+    if let Request::PluginViewReq { plugin, rows, cols } = msg.request {
+        let result = plugins.send_ui_key(&plugin, 0, rows, cols, true);
+        let json = serde_json::to_string(&ui_ack(id, result)).unwrap_or_default();
+        let _ = out_tx.send(json);
+        return;
+    }
+
+    if let Request::PluginData { plugin, data } = msg.request {
+        let result = plugins.send_ui_data(&plugin, &data);
+        let json = serde_json::to_string(&ui_ack(id, result)).unwrap_or_default();
+        let _ = out_tx.send(json);
+        return;
+    }
+
     // 库模糊搜索：查索引直接回（不进引擎）
     if let Request::Find { query } = msg.request {
         let tracks = {
@@ -267,4 +295,15 @@ pub(crate) async fn dispatch(
         return;
     }
     send_reply(id, reply_rx.await, out_tx);
+}
+
+/// UI 插件按键/视图请求的应答：投递成功回 Ok，失败回 error。
+fn ui_ack(id: u64, result: Result<(), String>) -> ServerMsg {
+    match result {
+        Ok(()) => ServerMsg::Reply {
+            id,
+            result: Reply::Ok,
+        },
+        Err(error) => error_reply(id, error),
+    }
 }
