@@ -85,7 +85,7 @@ fn 白名单外_错误传回插件() {
     let mut p = plugin_with(mock_daemon(seen.clone(), serde_json::json!(null)));
 
     let reply = p.call_method("denied", &serde_json::json!({})).unwrap();
-    let err = reply.err().expect("白名单外请求应失败");
+    let err = reply.expect_err("白名单外请求应失败");
     assert!(err.contains("插件无权调用"), "错误信息: {err}");
 }
 

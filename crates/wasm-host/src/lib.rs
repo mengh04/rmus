@@ -315,11 +315,10 @@ impl Plugin {
             |caller: Caller<'_, HostState>| -> i32 {
                 let state = caller.data();
                 let set = state.cancelled.0.lock().unwrap();
-                let r = match state.current_call {
+                match state.current_call {
                     Some(id) => set.contains(&id) as i32,
                     None => (state.worker_cancel && !set.is_empty()) as i32,
-                };
-                r
+                }
             },
         )?;
         // 方法回包：JSON 行 {"result":...} / {"error":"..."}
@@ -862,14 +861,15 @@ impl Plugin {
                     .unwrap()
                     .get(&(task_id.max(0) as u64))
                     .is_some();
-                if found {
-                    caller
+                if found
+                    && let Some(handle) = caller
                         .data()
                         .worker_cancels
                         .lock()
                         .unwrap()
                         .get(&(task_id.max(0) as u64))
-                        .map(|h| h.cancel(task_id.max(0) as u64));
+                {
+                    handle.cancel(task_id.max(0) as u64);
                 }
                 found as i32
             },

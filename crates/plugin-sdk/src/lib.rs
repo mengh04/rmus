@@ -614,10 +614,7 @@ pub mod fs {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
             let n = unsafe { host::rmus_file_write(self.0, buf.as_ptr(), buf.len() as u32) };
             if n < 0 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "宿主写文件失败",
-                ));
+                return Err(std::io::Error::other("宿主写文件失败"));
             }
             Ok(n as usize)
         }
@@ -630,10 +627,7 @@ pub mod fs {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
             let n = unsafe { host::rmus_file_read(self.0, buf.as_mut_ptr(), buf.len() as u32) };
             if n < 0 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "宿主读文件失败",
-                ));
+                return Err(std::io::Error::other("宿主读文件失败"));
             }
             Ok(n as usize)
         }
@@ -648,10 +642,7 @@ pub mod fs {
             };
             let p = unsafe { host::rmus_file_seek(self.0, off, whence) };
             if p < 0 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "宿主 seek 失败",
-                ));
+                return Err(std::io::Error::other("宿主 seek 失败"));
             }
             Ok(p as u64)
         }
@@ -827,7 +818,7 @@ pub mod ui {
     pub fn pad_right(text: &str, w: usize) -> String {
         let mut out = fit(text, w);
         let width: usize = out.width();
-        out.extend(core::iter::repeat(' ').take(w.saturating_sub(width)));
+        out.push_str(&" ".repeat(w.saturating_sub(width)));
         out
     }
 
@@ -835,7 +826,7 @@ pub mod ui {
     pub fn pad_left(text: &str, w: usize) -> String {
         let cut = fit(text, w);
         let width: usize = cut.width();
-        let mut out: String = core::iter::repeat(' ').take(w.saturating_sub(width)).collect();
+        let mut out = " ".repeat(w.saturating_sub(width));
         out.push_str(&cut);
         out
     }
@@ -1035,11 +1026,9 @@ pub mod ui {
 
     /// 进度条：`label ▕▊▊▋..... 42%`（块字符按比例填充）。
     pub fn progress(received: u64, total: u64, label: &str, width: usize) {
-        let pct = if total > 0 {
-            (received.min(total) * 100 / total) as usize
-        } else {
-            0
-        };
+        let pct = (received.min(total) * 100)
+            .checked_div(total)
+            .map_or(0, |p| p as usize);
         // 条宽 = width - 标签与百分比的空间（粗略预算，宿主 fit 兜底）
         let bar_width = width.saturating_sub(label.chars().count() + 8).max(4);
         let filled = bar_width * pct / 100;

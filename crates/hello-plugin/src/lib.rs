@@ -61,24 +61,22 @@ pub extern "C" fn update(ev: i32) -> i32 {
         KIND_UP => {
             let cur = SELECTED.load(Ordering::Relaxed);
             SELECTED.store(cur.saturating_sub(1), Ordering::Relaxed);
-            return 1;
+            1
         }
         KIND_DOWN => {
             let cur = SELECTED.load(Ordering::Relaxed);
             if (cur as usize) < DEMO_ITEMS.len() - 1 {
                 SELECTED.store(cur + 1, Ordering::Relaxed);
             }
-            return 1;
+            1
         }
         KIND_SPACE => {
             // 空格步进假进度
             let cur = DOWNLOADED.load(Ordering::Relaxed);
             DOWNLOADED.store((cur + 25).min(100), Ordering::Relaxed);
-            return 1;
+            1
         }
-        KIND_ENTER => {
-            return 1; // 确认：重绘（v0 无副作用）
-        }
+        KIND_ENTER => 1, // 确认：重绘（v0 无副作用）
         KIND_CHAR => {
             // j/k 导航（vim 习惯）
             if event::char_of(ev) == Some('j') {
@@ -87,9 +85,9 @@ pub extern "C" fn update(ev: i32) -> i32 {
             if event::char_of(ev) == Some('k') {
                 return update(event::encode(KIND_UP, 0));
             }
-            return 0;
+            0
         }
-        _ => return 0,
+        _ => 0,
     }
 }
 

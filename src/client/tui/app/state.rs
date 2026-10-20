@@ -273,7 +273,7 @@ mod tests {
         // 只有注册了 tab 的插件：仍然没有「插件」面板
         let tabs = Tab::visible(&[plugin("rmus-dl", true, Some("在线"))]);
         assert_eq!(tabs.len(), 4);
-        assert!(!tabs.iter().any(|t| *t == Tab::Plugins));
+        assert!(!tabs.contains(&Tab::Plugins));
 
         // rmus-dl（注册「在线」）+ hello（未注册）+ echo（注册「演示」）：
         // 按清单顺序插入插件 tab，标题用声明的字符串
