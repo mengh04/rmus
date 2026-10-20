@@ -1,16 +1,23 @@
 //! worker 抓取链路定位测试：UI 通道发起订阅 → worker 跑 fetch_feed →
 //! 事件回注。真网络（机核 feed），把 daemon/TUI 全部剥掉。
 //!
-//! 前置：cargo build -p rmus-podcast --target wasm32-unknown-unknown
-//! 跑法：cargo test -p wasm-host --test fetch_worker -- --nocapture
+//! 前置：在 rmus-plugins 检出里
+//! `cargo build -p rmus-podcast --target wasm32-unknown-unknown`
+//! 跑法：cargo test -p wasm-host --test fetch_worker -- --ignored --nocapture
+//!
+//! 插件已移出本仓库，wasm 路径默认指向同级的 rmus-plugins 检出；
+//! 换位置时用 `RMUS_PODCAST_WASM=/path/to/rmus_podcast.wasm` 覆盖。
 
 use std::sync::{Arc, Mutex};
 
 use wasm_host::{Plugin, event};
 
 fn podcast_wasm_path() -> std::path::PathBuf {
+    if let Some(path) = std::env::var_os("RMUS_PODCAST_WASM") {
+        return path.into();
+    }
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/wasm32-unknown-unknown/debug/rmus_podcast.wasm")
+        .join("../../../rmus-plugins/target/wasm32-unknown-unknown/debug/rmus_podcast.wasm")
 }
 
 /// 真网络（机核 feed ~2.7MB）：功能冒烟用，不进常规套件——

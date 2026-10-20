@@ -14,7 +14,7 @@
 use anyhow::{Context, bail};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use wasmi::{Caller, Engine, Error, Linker, Module, Store, TypedFunc};
 
@@ -487,6 +487,14 @@ impl Plugin {
                 let mut run = || -> anyhow::Result<i32> {
                     let path = String::from_utf8(read_memory(&caller, ptr, len)?)
                         .context("路径不是 UTF-8")?;
+                    // 写模式隐式创建父目录（podcasts/<slug>/ 这类插落数据
+                    // 目录；路径白名单 TODO 一起做，现按宿主信任插件）
+                    if let Some(parent) = Path::new(&path).parent()
+                        && (mode == 0 || mode == 2)
+                    {
+                        std::fs::create_dir_all(parent)
+                            .with_context(|| format!("创建目录 {}", parent.display()))?;
+                    }
                     let file = match mode {
                         // 0 = 写截断（下载临时文件）；1 = 只读；2 = 读写不截断
                         // （lofty tag 就地修改：rewind 重写 tag 区、音频原位保留）

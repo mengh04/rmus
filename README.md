@@ -96,26 +96,29 @@ support 24-bit color.
 
 ## Plugins
 
-rmusd hosts out-of-process plugins: independent executables that speak a small
-NDJSON protocol over stdio. The player itself stays capability-agnostic — it
-knows nothing about what a plugin does.
+rmusd hosts plugins: either wasm32 modules (wasmi, capabilities proxied by the
+host) or out-of-process executables speaking a small NDJSON protocol over
+stdio. The player itself stays capability-agnostic — it knows nothing about
+what a plugin does.
 
 - Discovery: `$XDG_DATA_HOME/rmus/plugins/*` (default `~/.local/share/rmus/plugins`),
   `~/.config/rmus/plugins/*`, `$XDG_DATA_DIRS/*/rmus/plugins`; override with
   `RMUS_PLUGIN_DIR` (colon-separated)
-- Each executable is handshaked via `--rmus-manifest`, then spawned long-lived
-  as `--rmus-plugin` on first use; sessions idle out after 10 minutes
+- wasm plugins are handshaked in-process (manifest export); executables via
+  `--rmus-manifest`, then spawned long-lived as `--rmus-plugin` on first use;
+  sessions idle out after 10 minutes
 - Calls the manifest marks as `task` return a job number immediately and stream
   progress to every client as `Event::Plugin`; `call` methods block up to 30s
 
-The reference plugin is [rmus-dl](https://github.com/): online search +
-download (kuwo / kugou). Install its binary into the plugins directory and
-restart `rmusd`:
+Plugins live in [rmus-plugins](https://github.com/mengh04/rmus-plugins):
+`rmus-dl` (online search + download via kuwo / kugou) and `rmus-podcast` (RSS
+subscriptions and episode playback). Build them there and drop the `.wasm`
+into the plugins directory, then restart `rmusd`:
 
 ```
-cargo install --git <rmus-dl-url>   # or build locally
+cargo build --release --target wasm32-unknown-unknown
 mkdir -p ~/.local/share/rmus/plugins
-ln -s ~/.cargo/bin/rmus-dl ~/.local/share/rmus/plugins/
+cp target/wasm32-unknown-unknown/release/rmus_dl.wasm ~/.local/share/rmus/plugins/rmus-dl.wasm
 ```
 
 Then the TUI grows an `在线` tab: `/` searches, `d` downloads (progress in the
