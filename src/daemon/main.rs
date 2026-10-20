@@ -92,7 +92,7 @@ fn main() -> Result<()> {
         spawn_library_watcher(library.clone())?;
 
         // 插件宿主：扫描插件目录、握手、按需托管会话
-        let plugins = plugin_host::PluginHost::discover(events_tx.clone()).await;
+        let plugins = plugin_host::PluginHost::discover(events_tx.clone(), cmd_tx.clone()).await;
         if plugins.is_empty() {
             println!("[rmusd] 未发现插件（可选装，不影响播放）");
         }

@@ -42,6 +42,11 @@ type NotifyFn = Box<dyn FnMut(Option<u64>, Value) + Send>;
 /// 后台任务事件出口（daemon 侧桥接成 UI 线程消息）。
 pub type TaskEvents = Arc<dyn Fn(String) + Send + Sync>;
 
+/// daemon RPC 出口（daemon 侧白名单执行：Status / Peek / Back）。
+/// 插件线程阻塞调用，实现在 daemon 的 tokio 侧。请求/响应都是 JSON
+/// Value——Request 的解析与白名单校验集中在 daemon 侧桥函数。
+pub type DaemonFn = Arc<dyn Fn(Value) -> Result<Value, String> + Send + Sync>;
+
 /// 取消句柄：跨线程标记某 call 已取消（`rmus.cancelled` 的查询源）。
 /// 插件线程阻塞在长任务里时，会话线程也能标记——插件在进度间隙自查生效。
 #[derive(Clone, Default)]
@@ -112,6 +117,12 @@ struct HostState {
     next_file: i32,
     /// 下载产物根目录（`rmus.library_dir` 提供给插件）
     lib_dir: PathBuf,
+    /// daemon RPC 出口（`rmus.daemon` 调用；未注入时 RPC 返回错误）
+    daemon_call: Option<DaemonFn>,
+    /// 最近一次 daemon RPC 的响应（`rmus.daemon_read` 读走；下次 `daemon` 覆盖）
+    daemon_reply: Vec<u8>,
+    /// daemon 数据根目录（`rmus.data_dir` 提供给插件）
+    data_dir: PathBuf,
 }
 
 /// 一个进行中的 HTTP 响应：元数据在 open 时定格，body 流式读。
@@ -138,6 +149,9 @@ impl Default for HostState {
             worker_cancel: false,
             wasm_path: None,
             lib_dir: PathBuf::new(),
+            daemon_call: None,
+            daemon_reply: Vec::new(),
+            data_dir: PathBuf::new(),
             // cookie store 未开启（rmus-dl 用了但接口实测不强制；TODO 需要时接 CookieStore）
             agent: ureq::AgentBuilder::new()
                 .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36")
@@ -648,6 +662,64 @@ impl Plugin {
                 run().unwrap_or(-1)
             },
         )?;
+        // daemon 数据根（插件数据落点；库根之外，躲音乐库扫描）
+        linker.func_wrap(
+            "rmus",
+            "data_dir",
+            |mut caller: Caller<'_, HostState>, out: i32, cap: i32| -> i32 {
+                let mut run = || -> anyhow::Result<i32> {
+                    let dir = caller.data().data_dir.display().to_string();
+                    write_guest(&mut caller, out, cap, dir.as_bytes())
+                };
+                run().unwrap_or(-1)
+            },
+        )?;
+        // daemon RPC：请求 JSON（协议 Request 的 tagged 形态）进，白名单
+        // 由 daemon 侧出口执行；响应暂存 daemon_reply，daemon_read 读走。
+        // 响应包装 {"ok":true,"reply":..} / {"ok":false,"error":..}
+        linker.func_wrap(
+            "rmus",
+            "daemon",
+            |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| -> i32 {
+                let mut run = || -> anyhow::Result<i32> {
+                    let text = String::from_utf8(read_memory(&caller, ptr, len)?)
+                        .context("daemon RPC 请求不是 UTF-8")?;
+                    let request: Value =
+                        serde_json::from_str(&text).context("daemon RPC 请求不是合法 JSON")?;
+                    let f = caller
+                        .data()
+                        .daemon_call
+                        .clone()
+                        .context("daemon RPC 未接入")?;
+                    let line = match f(request) {
+                        Ok(reply) => serde_json::json!({ "ok": true, "reply": reply }),
+                        Err(error) => serde_json::json!({ "ok": false, "error": error }),
+                    };
+                    caller.data_mut().daemon_reply = line.to_string().into_bytes();
+                    Ok(0)
+                };
+                run().unwrap_or(-1)
+            },
+        )?;
+        // 读走上次 daemon RPC 的响应：返回完整长度（截断时按它扩容重读，
+        // read 可重复调用），内容写入按 cap 截断
+        linker.func_wrap(
+            "rmus",
+            "daemon_read",
+            |mut caller: Caller<'_, HostState>, out: i32, cap: i32| -> i32 {
+                let mut run = || -> anyhow::Result<i32> {
+                    let bytes = caller.data().daemon_reply.clone();
+                    let total = bytes.len();
+                    let n = (cap as usize).min(total);
+                    let memory = caller.data().memory.context("缺少 memory")?;
+                    memory
+                        .write(&mut caller, out as usize, &bytes[..n])
+                        .context("写入插件内存越界")?;
+                    Ok(total as i32)
+                };
+                run().unwrap_or(-1)
+            },
+        )?;
         // 墙钟毫秒（进度节流 / 临时文件名）
         linker.func_wrap("rmus", "now_ms", || -> i64 {
             std::time::SystemTime::now()
@@ -687,12 +759,14 @@ impl Plugin {
                         .context("缺少 method")?
                         .to_string();
                     let params = spec.get("params").cloned().unwrap_or(Value::Null);
-                    let (wasm_path, lib_dir, events) = {
+                    let (wasm_path, lib_dir, events, daemon_call, data_dir) = {
                         let state = caller.data();
                         (
                             state.wasm_path.clone().context("未配置后台任务源")?,
                             state.lib_dir.clone(),
                             state.task_events.clone().context("未配置后台任务源")?,
+                            state.daemon_call.clone(),
+                            state.data_dir.clone(),
                         )
                     };
                     // 任务取消句柄：宿主先建、注册进表（cancel_task 用）、
@@ -732,6 +806,12 @@ impl Plugin {
                                 let mut worker = Plugin::new(&wasm, notify)?;
                                 worker.set_lib_dir(lib_dir);
                                 worker.set_cancel_handle(handle);
+                                // worker 与主实例同能力面：进度采样 / 连播
+                                // 接管都在 worker 里做，daemon RPC 必须可用
+                                if let Some(f) = daemon_call {
+                                    worker.set_daemon_call(f);
+                                }
+                                worker.set_data_dir(data_dir);
                                 let outcome = worker.call_method(&method, &params);
                                 cancels.lock().unwrap().remove(&task_id);
                                 match outcome {
@@ -895,6 +975,17 @@ impl Plugin {
     /// 设置库目录（`rmus.library_dir` 返回给插件；下载产物根）。
     pub fn set_lib_dir(&mut self, dir: PathBuf) {
         self.store.data_mut().lib_dir = dir;
+    }
+
+    /// 注入 daemon RPC 出口（`rmus.daemon` 的执行方）。未注入时 RPC 报
+    /// "未接入"——纯 UI 插件 / 测试桩可以不接。
+    pub fn set_daemon_call(&mut self, f: DaemonFn) {
+        self.store.data_mut().daemon_call = Some(f);
+    }
+
+    /// 注入 daemon 数据根目录（`rmus.data_dir` 返回值）。
+    pub fn set_data_dir(&mut self, dir: PathBuf) {
+        self.store.data_mut().data_dir = dir;
     }
 
     /// 配置后台任务源：worker 实例从该 wasm 文件实例化；任务事件（进度/

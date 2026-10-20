@@ -21,6 +21,8 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinSet;
 use wasm_host::Plugin as WasmPlugin;
 
+use rmus::engine::ToEngine;
+
 /// 已发现的一个插件。
 struct Discovered {
     manifest: PluginManifest,
@@ -38,8 +40,10 @@ struct Inner {
     /// 会话表单独 Arc：stdout 读任务退出时要回来摘除自己
     sessions: Arc<tokio::sync::Mutex<HashMap<String, Arc<Session>>>>,
     /// wasm 插件会话表：wasmi 实例独占线程，消息经 channel 注入
-    wasm_sessions: Mutex<HashMap<String, WasmSession>>,
+    wasm_sessions: Arc<Mutex<HashMap<String, WasmSession>>>,
     events_tx: broadcast::Sender<Event>,
+    /// 引擎命令通道：插件 daemon RPC（白名单）经它进引擎
+    cmd_tx: std::sync::mpsc::Sender<ToEngine>,
 }
 
 /// wasm 插件会话的一帧输入：UI 按键、方法调用。（取消不进通道——
@@ -112,7 +116,10 @@ impl PluginHost {
     /// 扫描插件目录并逐个握手。失败/不合规的候选静默跳过（stderr 留痕）。
     /// `.wasm` 文件走 wasm 握手（实例化 + manifest export），其余按可执行
     /// 文件处理（`--rmus-manifest` 子进程握手）。
-    pub async fn discover(events_tx: broadcast::Sender<Event>) -> Self {
+    pub async fn discover(
+        events_tx: broadcast::Sender<Event>,
+        cmd_tx: std::sync::mpsc::Sender<ToEngine>,
+    ) -> Self {
         let mut candidates: Vec<PathBuf> = Vec::new();
         for dir in plugin::plugin_dirs() {
             let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -177,9 +184,11 @@ impl PluginHost {
         let host = Self(Arc::new(Inner {
             plugins,
             sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            wasm_sessions: Mutex::new(HashMap::new()),
+            wasm_sessions: Arc::new(Mutex::new(HashMap::new())),
             events_tx,
+            cmd_tx,
         }));
+        spawn_daemon_event_bridge(host.0.events_tx.clone(), host.0.wasm_sessions.clone());
         tokio::spawn(reaper(host.clone()));
         host
     }
@@ -215,8 +224,13 @@ impl PluginHost {
             if !found.wasm {
                 return Err(format!("插件 “{name}” 不是 wasm 插件"));
             }
-            let session = spawn_wasm_session(name.to_string(), found.path.clone(), self.0.events_tx.clone())
-                .map_err(|e| e.to_string())?;
+            let session = spawn_wasm_session(
+                name.to_string(),
+                found.path.clone(),
+                self.0.events_tx.clone(),
+                self.0.cmd_tx.clone(),
+            )
+            .map_err(|e| e.to_string())?;
             sessions.insert(name.to_string(), session);
         }
         f(sessions.get(name).unwrap())
@@ -498,10 +512,121 @@ fn wasm_handshake(path: PathBuf) -> anyhow::Result<Option<Discovered>> {
 /// 方法执行的 notify 经 on_notify 实时转发为 `Event::Plugin`；长任务
 /// 完成包装成 done/failed 广播，短调用走 oneshot。实例化在调用线程完成
 /// （μs 级），CancelHandle 因此无竞态地带出给会话表。
+/// daemon RPC 桥：插件线程阻塞调用（`rmus.daemon`）→ 专用通道 → 独立
+/// 线程白名单执行。不复用插件自身的 WasmMsg channel——插件线程正阻塞在
+/// RPC 里，消费不了它，复用必死锁。
+fn daemon_rpc_bridge(
+    name: String,
+    cmd_tx: std::sync::mpsc::Sender<ToEngine>,
+) -> wasm_host::DaemonFn {
+    let (rpc_tx, rpc_rx) = std::sync::mpsc::channel::<(
+        serde_json::Value,
+        tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>,
+    )>();
+    std::thread::Builder::new()
+        .name(format!("rmus-daemon-rpc-{name}"))
+        .spawn(move || {
+            while let Ok((request, rtx)) = rpc_rx.recv() {
+                let reply = execute_daemon_rpc(&cmd_tx, request);
+                let _ = rtx.send(reply);
+            }
+        })
+        .expect("daemon rpc 线程启动失败");
+    std::sync::Arc::new(move |request| {
+        let (rtx, rrx) = tokio::sync::oneshot::channel();
+        rpc_tx
+            .send((request, rtx))
+            .map_err(|_| "daemon RPC 通道已关闭".to_string())?;
+        rrx.blocking_recv().map_err(|_| "daemon RPC 无响应".to_string())?
+    })
+}
+
+/// 插件的 daemon RPC 白名单执行。请求是协议 Request 的 tagged JSON——
+/// 先解析（形态非法即拒绝），再按变体过白名单。v1：Status（进度采样）、
+/// Peek（点播/连播的无缝切集）、Back（结束试听）。其余一律拒绝——插件
+/// 不该摸到管理类操作（清队列/重扫库/退出）。
+fn execute_daemon_rpc(
+    cmd_tx: &std::sync::mpsc::Sender<ToEngine>,
+    request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use rmus::proto::Request;
+    let request: Request =
+        serde_json::from_value(request).map_err(|e| format!("请求不是合法 Request: {e}"))?;
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let sent = match request {
+        // 直通引擎的查询/控制
+        Request::Status | Request::QueueList | Request::Back => cmd_tx
+            .send(ToEngine::Request {
+                id: 0,
+                request,
+                reply: reply_tx,
+            })
+            .is_ok(),
+        // Peek 是 daemon 层处理（先扫描再进引擎试听态）；插件场景是
+        // 单集文件，同步扫描足够快（目录也能容忍）
+        Request::Peek { paths } => {
+            let items = rmus::scan::collect(&paths);
+            if items.is_empty() {
+                return Err("没有找到可播放的音频文件".into());
+            }
+            cmd_tx
+                .send(ToEngine::PeekScanned {
+                    id: 0,
+                    items,
+                    reply: reply_tx,
+                })
+                .is_ok()
+        }
+        _other => {
+            return Err("插件无权调用该请求（白名单仅 Status/Peek/Back）".into());
+        }
+    };
+    if !sent {
+        return Err("引擎不可达".into());
+    }
+    let reply = reply_rx
+        .blocking_recv()
+        .map_err(|_| "引擎回包通道关闭".to_string())??;
+    serde_json::to_value(reply).map_err(|e| e.to_string())
+}
+
+/// daemon 事件桥：切歌/停止广播推给所有 wasm 会话（插件的连播接管与
+/// 播完标记以此为信号源）。复用 worker 事件通道（KIND_DATA），JSON 加
+/// `kind:"daemon"` 与任务事件区分；Position 每秒一条不转发（太吵，
+/// 插件进度记忆靠自己的采样循环）。
+fn spawn_daemon_event_bridge(
+    events_tx: broadcast::Sender<Event>,
+    wasm_sessions: Arc<Mutex<HashMap<String, WasmSession>>>,
+) {
+    let mut bridge_rx = events_tx.subscribe();
+    tokio::spawn(async move {
+        loop {
+            match bridge_rx.recv().await {
+                Ok(ev @ Event::SongChanged { .. }) | Ok(ev @ Event::StateChanged { .. }) => {
+                    let mut value = serde_json::to_value(&ev).unwrap_or_default();
+                    if let Some(obj) = value.as_object_mut() {
+                        obj.insert("kind".into(), serde_json::json!("daemon"));
+                    }
+                    let json = value.to_string();
+                    for session in wasm_sessions.lock().unwrap().values() {
+                        let _ = session.tx.send(WasmMsg::Data { json: json.clone() });
+                    }
+                }
+                Ok(_) => {}
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    eprintln!("[rmusd] 插件事件桥落后 {n} 条（丢弃；进度有采样兜底）");
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
 fn spawn_wasm_session(
     name: String,
     path: PathBuf,
     events_tx: broadcast::Sender<Event>,
+    cmd_tx: std::sync::mpsc::Sender<ToEngine>,
 ) -> anyhow::Result<WasmSession> {
     let (tx, rx) = std::sync::mpsc::channel::<WasmMsg>();
     let wasm = std::fs::read(&path).context("无法读取 wasm 文件")?;
@@ -519,6 +644,8 @@ fn spawn_wasm_session(
     };
     let mut plugin = WasmPlugin::new(&wasm, notify_events).context("实例化失败")?;
     plugin.set_lib_dir(rmus::library::root());
+    plugin.set_daemon_call(daemon_rpc_bridge(name.clone(), cmd_tx.clone()));
+    plugin.set_data_dir(rmus::plugin::data_root());
     // 最近一次按键的视口（Data 事件重绘用；默认 24×80）
     let mut viewport: u64 = ((24u64) << 16) | 80;
     let cancels = plugin.cancel_handle();

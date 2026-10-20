@@ -49,6 +49,22 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// daemon 数据根（`~/.local/share/rmus`，尊重 XDG_DATA_HOME）：插件私有
+/// 数据（播客订阅/下载）的落点。与插件目录同源但**不是库根**——库根下的
+/// 音频文件会被音乐库扫描收编。
+pub fn data_root() -> PathBuf {
+    let data_home = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| {
+            std::env::var_os("HOME")
+                .map(|h| PathBuf::from(h).join(".local").join("share"))
+                .unwrap_or_default()
+        });
+    data_home.join("rmus")
+}
+
+
 /// 一个插件对外宣告的能力清单（`--rmus-manifest` 的解析结果）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginManifest {

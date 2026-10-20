@@ -61,6 +61,13 @@ mod host {
         pub fn rmus_now_ms() -> i64;
         #[link_name = "library_dir"]
         pub fn rmus_library_dir(out: *mut u8, cap: u32) -> i32;
+        // daemon RPC（白名单直通引擎：Status / Peek / Back）
+        #[link_name = "daemon"]
+        pub fn rmus_daemon(ptr: *const u8, len: u32) -> i32;
+        #[link_name = "daemon_read"]
+        pub fn rmus_daemon_read(out: *mut u8, cap: u32) -> i32;
+        #[link_name = "data_dir"]
+        pub fn rmus_data_dir(out: *mut u8, cap: u32) -> i32;
         // 网络
         #[link_name = "http_open"]
         pub fn rmus_http_open(ptr: *const u8, len: u32) -> i32;
@@ -129,6 +136,15 @@ mod host {
             0
         }
         pub unsafe fn rmus_library_dir(_out: *mut u8, _cap: u32) -> i32 {
+            -1
+        }
+        pub unsafe fn rmus_daemon(_ptr: *const u8, _len: u32) -> i32 {
+            -1
+        }
+        pub unsafe fn rmus_daemon_read(_out: *mut u8, _cap: u32) -> i32 {
+            -1
+        }
+        pub unsafe fn rmus_data_dir(_out: *mut u8, _cap: u32) -> i32 {
             -1
         }
         pub unsafe fn rmus_http_open(_ptr: *const u8, _len: u32) -> i32 {
@@ -337,6 +353,71 @@ pub fn now_ms() -> u64 {
 /// 下载产物根目录（rmusd 的音乐库根目录）。
 pub fn library_dir() -> String {
     read_into_host(|out, cap| unsafe { host::rmus_library_dir(out, cap) }).unwrap_or_default()
+}
+
+/// daemon 数据根目录（`~/.local/share/rmus`）。播客等插件数据的落点；
+/// 放这里而不是 `library_dir`——库根下的音频文件会被音乐库扫描收编。
+pub fn data_dir() -> String {
+    read_into_host(|out, cap| unsafe { host::rmus_data_dir(out, cap) }).unwrap_or_default()
+}
+
+/// daemon RPC（宿主代理，白名单直通引擎）。
+///
+/// 白名单 v1：`Status`（进度采样）/ `Peek`（试听态播放，播客点播与连播
+/// 都靠它）/ `Back`（结束试听）。其余请求宿主侧一律拒绝。
+pub mod daemon {
+    use super::host;
+
+    /// 发起 RPC。`request` 是协议 Request 的 tagged JSON
+    /// （`{"method":..,"params":..}`），返回 Reply 的 JSON（untagged 形态）；
+    /// Err = daemon 侧错误信息。
+    pub fn call(request: serde_json::Value) -> Result<serde_json::Value, String> {
+        let text = serde_json::to_string(&request).map_err(|e| e.to_string())?;
+        let rc = unsafe { host::rmus_daemon(text.as_ptr(), text.len() as u32) };
+        if rc != 0 {
+            return Err("daemon RPC 宿主不可用".into());
+        }
+        // 响应读取：daemon_read 返回完整长度、写入按 cap 截断——
+        // 截断则按完整长度扩容重读（read 可重复调用，直到下次 daemon 覆盖）
+        let mut cap = 4096usize;
+        loop {
+            let mut buf = vec![0u8; cap];
+            let n = unsafe { host::rmus_daemon_read(buf.as_mut_ptr(), buf.len() as u32) };
+            if n < 0 {
+                return Err("daemon RPC 响应读取失败".into());
+            }
+            if (n as usize) <= cap {
+                buf.truncate(n as usize);
+                let line: serde_json::Value =
+                    serde_json::from_slice(&buf).map_err(|e| e.to_string())?;
+                return match line.get("ok").and_then(|v| v.as_bool()) {
+                    Some(true) => Ok(line.get("reply").cloned().unwrap_or(serde_json::Value::Null)),
+                    _ => Err(line
+                        .get("error")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("未知错误")
+                        .to_string()),
+                };
+            }
+            cap = n as usize + 64;
+        }
+    }
+
+    /// 当前播放状态快照（Reply::Status：state/position_ms/duration_ms/track…）。
+    pub fn status() -> Result<serde_json::Value, String> {
+        call(serde_json::json!({ "method": "status" }))
+    }
+
+    /// 试听态播放这些文件（存档当前队列，播完自动恢复）。已在试听态时
+    /// 只换临时队列、原存档不动——播客连播的无缝切集就靠这个语义。
+    pub fn peek(paths: Vec<String>) -> Result<serde_json::Value, String> {
+        call(serde_json::json!({ "method": "peek", "params": { "paths": paths } }))
+    }
+
+    /// 提前结束试听，恢复进入前的状态。
+    pub fn back() -> Result<serde_json::Value, String> {
+        call(serde_json::json!({ "method": "back" }))
+    }
 }
 
 /// 宿主把字符串写进插件缓冲的通用封装（4KB 上限，够 URL/header/路径用）。

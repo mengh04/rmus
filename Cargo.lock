@@ -740,6 +740,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "daemon-test-plugin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rmus-plugin-sdk",
+ "serde_json",
+]
+
+[[package]]
 name = "darling"
 version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
