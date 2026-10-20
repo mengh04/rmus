@@ -225,6 +225,11 @@ pub enum Event {
         #[serde(default)]
         selected: Option<usize>,
     },
+    /// 播放错误：解码失败 / 整个队列都播不了。引擎已按策略跳过或停止，
+    /// 客户端负责告诉用户发生了什么（daemon 自身的 stderr 可能是 /dev/null）。
+    Error {
+        message: String,
+    },
 }
 
 /// UI 插件渲染输出的一行。行内是带语义样式的 span 序列；

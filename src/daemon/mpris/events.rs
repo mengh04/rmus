@@ -93,5 +93,7 @@ pub(super) async fn handle_event(
         }
         // 插件事件与桌面媒体接口无关
         Event::Plugin { .. } | Event::PluginView { .. } => {}
+        // 播放错误只走客户端提示，桌面侧不显示
+        Event::Error { .. } => {}
     }
 }

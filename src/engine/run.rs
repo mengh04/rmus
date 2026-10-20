@@ -93,8 +93,14 @@ impl Engine {
                         if self.fatal_streak >= limit {
                             // 整个队列挨个试过都失败：停止（试听态则恢复），避免循环重试烧 CPU
                             eprintln!("[rmusd] 队列连续 {limit} 首无法播放，停止播放");
+                            self.emit(Event::Error {
+                                message: format!("无法播放，已停止：{error}"),
+                            });
                             self.finish_or_restore();
                         } else {
+                            self.emit(Event::Error {
+                                message: format!("无法播放，已跳过：{error}"),
+                            });
                             self.on_eof();
                         }
                     }

@@ -30,7 +30,7 @@ use symphonia::core::{
     units::Time,
 };
 use symphonia::default::codecs::{
-    AdpcmDecoder, AlacDecoder, FlacDecoder, MpaDecoder, PcmDecoder, VorbisDecoder,
+    AacDecoder, AdpcmDecoder, AlacDecoder, FlacDecoder, MpaDecoder, PcmDecoder, VorbisDecoder,
 };
 
 use super::resample::Resampler;
@@ -137,6 +137,8 @@ fn decode_loop(
 
     let mut codecs = CodecRegistry::new();
     codecs.register_audio_decoder::<MpaDecoder>();
+    // AAC（m4a/mp4 播客主流编码；symphonia 的 aac feature 已由 "all" 打开）
+    codecs.register_audio_decoder::<AacDecoder>();
     codecs.register_audio_decoder::<PcmDecoder>();
     codecs.register_audio_decoder::<AlacDecoder>();
     codecs.register_audio_decoder::<FlacDecoder>();

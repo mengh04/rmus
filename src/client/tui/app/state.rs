@@ -240,10 +240,13 @@ pub struct Message {
 }
 
 impl Message {
+    /// 普通提示 5 秒；错误多留一会儿，够看清原因（多数错误来自一次操作，
+    /// 错过了只能靠 daemon 日志，而它可能是 /dev/null）。
     const TTL: Duration = Duration::from_secs(5);
+    const ERROR_TTL: Duration = Duration::from_secs(15);
 
     pub fn alive(&self) -> bool {
-        self.at.elapsed() < Self::TTL
+        self.at.elapsed() < if self.error { Self::ERROR_TTL } else { Self::TTL }
     }
 }
 

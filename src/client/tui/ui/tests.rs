@@ -3,7 +3,7 @@
 
 use super::draw;
 use crate::client::tui::app::{App, CmdPalette, Message, Mode, SearchMode, SearchState};
-use crate::client::tui::conn::Daemon;
+use crate::client::tui::conn::{Daemon, Feed};
 use crate::proto::{PlayState, RepeatMode, StatusInfo, TrackInfo};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -140,6 +140,19 @@ fn 消息与空态() {
     app.status = None;
     let lines = render(&mut app, 100, 30);
     assert!(lines.iter().any(|l| l.contains("队列是空的")));
+}
+
+/// 播放错误（Event::Error）要落到状态行，且按错误样式停留更久。
+#[test]
+fn 播放错误显示在状态行() {
+    let mut app = demo_app();
+    app.handle_feed(Feed::Daemon(crate::proto::Event::Error {
+        message: "无法播放，已跳过：/tmp/x.mp3: 不支持的编码".into(),
+    }));
+    let msg = app.message.as_ref().expect("错误应写进消息条");
+    assert!(msg.error, "错误消息要按错误样式显示");
+    assert!(msg.text.contains("不支持的编码"), "消息内容: {}", msg.text);
+    assert!(msg.alive(), "错误消息应立即可见");
 }
 
 /// 打印一份快照（`cargo test -- --nocapture` 时人工看）。

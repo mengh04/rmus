@@ -404,6 +404,9 @@ impl App {
             // 下载进度/done 事件仍会广播；在线 tab 画布只消费
             // rmus-dl 自己的 PluginView，这里直接忽略
             Feed::Daemon(Event::Plugin { .. }) => {}
+            // 播放错误：解码失败/整队列都播不了（daemon 的 stderr 可能是
+            // /dev/null，只能靠事件告诉用户）
+            Feed::Daemon(Event::Error { message }) => self.notify(message, true),
             Feed::Disconnected => {
                 self.fatal = Some("与 rmusd 失去连接".into());
             }
