@@ -51,6 +51,9 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, mut conn: conn::Daemon) -
     let feeds = conn.take_feeds();
     let mut app = app::App::new(conn);
     app.startup();
+    // 初始数据拉取（消费 startup 置位的 need_*）：事件驱动后 recv 阻塞
+    // 等事件，daemon 停止态没有推送——不在这里拉，首帧永远"未同步"
+    app.refresh_if_needed();
     let mut title: Option<String> = None;
 
     let (tx, rx) = channel::<UiEvent>();

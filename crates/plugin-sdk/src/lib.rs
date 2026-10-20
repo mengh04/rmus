@@ -299,13 +299,21 @@ pub mod task {
     /// 取最近一条后台任务事件：`{"task_id":N,"event":"progress|done|failed",
     /// "data":...}`。仅在 `KIND_DATA` 事件的 update 调用内有效。
     pub fn last_event() -> Option<serde_json::Value> {
-        let mut buf = vec![0u8; 64 * 1024];
-        let n = unsafe { host::rmus_last_event(buf.as_mut_ptr(), buf.len() as u32) };
-        if n < 0 {
-            return None;
+        // 宿主返回完整长度、写入按 cap 截断——截断则扩容重读
+        // （read 可重复调用，内容保持到下一次 set_last_event 覆盖）
+        let mut cap = 64 * 1024;
+        loop {
+            let mut buf = vec![0u8; cap];
+            let n = unsafe { host::rmus_last_event(buf.as_mut_ptr(), buf.len() as u32) };
+            if n < 0 {
+                return None;
+            }
+            if (n as usize) <= cap {
+                buf.truncate(n as usize);
+                return serde_json::from_slice(&buf).ok();
+            }
+            cap = n as usize + 64;
         }
-        buf.truncate(n as usize);
-        serde_json::from_slice(&buf).ok()
     }
 }
 

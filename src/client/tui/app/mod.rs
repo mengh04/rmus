@@ -219,8 +219,9 @@ impl App {
                     self.execute(action);
                     return;
                 }
-                // 插件视图：`i` 进入按键直通（vim 习惯），全局键不被劫持
-                if self.tab == Tab::Plugins
+                // 插件画布（注册 tab 与「插件」面板）：`i` 进入按键直通
+                // （vim 习惯），全局键不被劫持；Esc 退出
+                if self.tab_is_plugin_canvas()
                     && matches!(
                         (key.modifiers, key.code),
                         (KeyModifiers::NONE, KeyCode::Char('i'))

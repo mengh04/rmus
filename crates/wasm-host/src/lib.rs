@@ -871,7 +871,14 @@ impl Plugin {
             |mut caller: Caller<'_, HostState>, out: i32, cap: i32| -> i32 {
                 let mut run = || -> anyhow::Result<i32> {
                     let bytes = caller.data().last_event.clone();
-                    write_guest(&mut caller, out, cap, &bytes)
+                    // 返回完整长度（写入按 cap 截断）——大事件（如整份 feed
+                    // 的 done 回执）由插件侧扩容重读
+                    let memory = caller.data().memory.context("缺少 memory")?;
+                    let n = bytes.len().min(cap as usize);
+                    memory
+                        .write(&mut caller, out as usize, &bytes[..n])
+                        .context("写入插件内存越界")?;
+                    Ok(bytes.len() as i32)
                 };
                 run().unwrap_or(-1)
             },
