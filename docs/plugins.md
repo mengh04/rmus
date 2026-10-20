@@ -143,8 +143,9 @@ SDK（`rmus_plugin_sdk::ui`）提供：
   `fit` / `pad_left` / `pad_right`（按显示宽度截断与填充，中文对齐
   与宿主一致）。画布行是流式排列，多列表格 = 每段 pad 到列定宽后
   顺序拼接
-- 事件编码：`event::encode(kind, payload)`，kind 表 DATA/CHAR/UP/DOWN
-  等；长任务经 `task::spawn`（后台 worker），事件经 `KIND_DATA` 回注
+- 事件编码：`event::encode(kind, payload)`，kind 表 DATA/CHAR/UP/DOWN/
+  BACKSPACE 等（`KIND_BACKSPACE` 供输入态删字符）；长任务经
+  `task::spawn`（后台 worker），事件经 `KIND_DATA` 回注
 
 ## 模拟与预览
 

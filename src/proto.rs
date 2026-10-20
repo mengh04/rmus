@@ -72,6 +72,8 @@ pub mod plugin_key {
     pub const KIND_SPACE: i32 = 6;
     /// 后台任务事件（数据在宿主缓冲，插件经 SDK `task::last_event()` 取）
     pub const KIND_DATA: i32 = 7;
+    /// 退格键（无 payload）；插件画布的输入态靠它删字符
+    pub const KIND_BACKSPACE: i32 = 8;
 
     pub fn encode(kind: i32, payload: i32) -> i32 {
         kind | (payload << 8)

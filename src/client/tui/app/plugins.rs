@@ -62,12 +62,15 @@ impl App {
 
     /// 切换 UI 插件的按键映射（v0：Enter/空格/上下/可见字符）。
     fn map_key(key: KeyEvent) -> Option<i32> {
-        use plugin_key::{encode, KIND_CHAR, KIND_DOWN, KIND_ENTER, KIND_SPACE, KIND_UP};
+        use plugin_key::{
+            encode, KIND_BACKSPACE, KIND_CHAR, KIND_DOWN, KIND_ENTER, KIND_SPACE, KIND_UP,
+        };
         match (key.modifiers, key.code) {
             (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Enter) => {
                 Some(encode(KIND_ENTER, 0))
             }
             (KeyModifiers::NONE, KeyCode::Char(' ')) => Some(encode(KIND_SPACE, 0)),
+            (KeyModifiers::NONE, KeyCode::Backspace) => Some(encode(KIND_BACKSPACE, 0)),
             (KeyModifiers::NONE, KeyCode::Up) => Some(encode(KIND_UP, 0)),
             (KeyModifiers::NONE, KeyCode::Down) => Some(encode(KIND_DOWN, 0)),
             (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {

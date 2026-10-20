@@ -726,6 +726,8 @@ pub mod event {
     pub const KIND_SPACE: i32 = 6;
     /// 后台任务事件（数据在 `last_event` 缓冲，SDK `task::last_event()` 取）
     pub const KIND_DATA: i32 = 7;
+    /// 退格键（无 payload）：输入态删一个字符
+    pub const KIND_BACKSPACE: i32 = 8;
 
     pub fn encode(kind: i32, payload: i32) -> i32 {
         kind | (payload << 8)
