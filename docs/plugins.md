@@ -146,6 +146,15 @@ SDK（`rmus_plugin_sdk::ui`）提供：
 - 事件编码：`event::encode(kind, payload)`，kind 表 DATA/CHAR/UP/DOWN/
   BACKSPACE 等（`KIND_BACKSPACE` 供输入态删字符）；长任务经
   `task::spawn`（后台 worker），事件经 `KIND_DATA` 回注
+- 列表语义：`ui::set_selected(row)` 声明画布高亮行（终端行号），
+  `ui::set_list(total, index)` 声明**当前列表**的总条数与选中下标。
+  宿主顶栏的 tab 计数、底栏 `n/N` 只认 `set_list`，不再拿画布行数
+  （≈ 终端高度）冒充列表长度；旧插件不声明就不显示。
+- 语义导航：插件画布上的 `gg` / `G` / `C-u` / `C-d` 由宿主翻译成
+  `KIND_TOP` / `KIND_BOTTOM` / `KIND_HALF_UP` / `KIND_HALF_DOWN`
+  转发，选中项与滚动仍归插件。`ui::ListState` 封装了这套状态机：
+  `handle(event, len, page)` 处理导航，`prepare(len, height, header_rows)`
+  每帧算窗口并声明 `set_selected` + `set_list`。
 
 ## 模拟与预览
 

@@ -228,7 +228,6 @@ impl App {
                     )
                 {
                     self.mode = Mode::Plugin;
-                    self.notify("-- 插件直通 -- Enter/空格 转发 · Esc 退出", false);
                     return;
                 }
                 // 插件画布：`r` 重新拉一次视图（比如插件刚重启）
@@ -326,12 +325,6 @@ impl App {
                         _ => self.playlists_selected,
                     };
                     self.visual = Some(VisualSel { anchor });
-                    let hint = if self.tab == Tab::Library {
-                        "-- VISUAL -- 移动扩选 · a 加入播放列表 · A 加入当前列表 · Esc 退出"
-                    } else {
-                        "-- VISUAL -- 已选中当前行 · 移动扩选 · d 剪切 / y 复制"
-                    };
-                    self.notify(hint, false);
                 } else if let Some(action) = keymap::resolve(key) {
                     self.execute(action);
                 }
@@ -398,8 +391,13 @@ impl App {
                 | Event::VolumeChanged { .. }
                 | Event::ModeChanged { .. },
             ) => self.need_status = true,
-            Feed::Daemon(Event::PluginView { plugin, lines, selected }) => {
-                self.apply_plugin_view(&plugin, lines, selected);
+            Feed::Daemon(Event::PluginView {
+                plugin,
+                lines,
+                selected,
+                list,
+            }) => {
+                self.apply_plugin_view(&plugin, lines, selected, list);
             }
             // 下载进度/done 事件仍会广播；在线 tab 画布只消费
             // rmus-dl 自己的 PluginView，这里直接忽略

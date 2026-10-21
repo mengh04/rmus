@@ -94,10 +94,13 @@ fn 导航_选中行移动() {
     assert!(lines[2].spans[0].style == "accent");
     // 插件声明的选中行同步给宿主（TUI 铺选中底色依据）
     assert_eq!(p.take_selected(), Some(2));
+    // 列表语义（总数, 下标）也同步给宿主（顶栏计数/底栏统计依据）
+    assert_eq!(p.take_list(), Some((4, 1)));
     // render 重新声明，值跟着走
     assert!(p.update(event::encode(event::KIND_CHAR, 'j' as i32)).unwrap());
     p.render(24, 80).unwrap();
     assert_eq!(p.take_selected(), Some(3));
+    assert_eq!(p.take_list(), Some((4, 2)));
 }
 
 #[test]

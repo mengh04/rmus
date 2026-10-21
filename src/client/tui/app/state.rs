@@ -100,6 +100,9 @@ pub struct PluginUi {
     /// 选中行（插件经 `rmus_set_selected` 声明的画布行号；TUI 用它铺
     /// 选中底色）
     pub selected: usize,
+    /// 当前列表语义（插件经 `rmus_set_list` 声明）：顶栏计数与底栏
+    /// `n/N` 只认它。旧插件不声明 = None（不显示，也不拿画布行数冒充）。
+    pub list: Option<crate::proto::PluginList>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -330,15 +333,24 @@ mod plugin_ui_tests {
     fn 选中行以插件声明为准_未声明沿用并夹紧() {
         let mut app = App::new(Daemon::detached());
         // 插件声明选中画布行 3
-        app.apply_plugin_view("p", vec![line(); 8], Some(3));
+        app.apply_plugin_view("p", vec![line(); 8], Some(3), None);
         assert_eq!(app.plugin_uis["p"].selected, 3);
 
-        // 未声明：沿用旧值
-        app.apply_plugin_view("p", vec![line(); 8], None);
+        // 列表语义独立于画布行号：300 集时底栏应显示 n/300
+        let list = crate::proto::PluginList {
+            total: 300,
+            index: 42,
+        };
+        app.apply_plugin_view("p", vec![line(); 8], Some(3), Some(list));
+        assert_eq!(app.plugin_uis["p"].list, Some(list));
+
+        // 未声明：沿用旧值（输入态等不画列表的帧）
+        app.apply_plugin_view("p", vec![line(); 8], None, None);
         assert_eq!(app.plugin_uis["p"].selected, 3);
+        assert_eq!(app.plugin_uis["p"].list, Some(list));
 
         // 视图缩短：夹紧到末行
-        app.apply_plugin_view("p", vec![line()], None);
+        app.apply_plugin_view("p", vec![line()], None, None);
         assert_eq!(app.plugin_uis["p"].selected, 0);
     }
 }

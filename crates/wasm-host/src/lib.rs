@@ -87,6 +87,9 @@ struct HostState {
     /// 本轮 `render` 里插件声明的选中行（画布行号；`rmus_set_selected` 写入，
     /// render 开始时清空——插件每帧显式声明，宿主不猜）
     selected: Option<usize>,
+    /// 本轮 `render` 里插件声明的列表语义（总条数, 选中下标；
+    /// `rmus_set_list` 写入）。宿主顶栏/底栏计数只认它，不数画布行。
+    list: Option<(usize, usize)>,
     /// 插件的线性内存；实例化后注入（宿主函数走 Caller 取，manifest 走这里）。
     memory: Option<wasmi::Memory>,
     /// 正在执行的方法调用 id（宿主侧编号；None = 无在途调用）
@@ -140,6 +143,7 @@ impl Default for HostState {
         Self {
             lines: Vec::new(),
             selected: None,
+            list: None,
             memory: None,
             current_call: None,
             cancelled: CancelHandle::default(),
@@ -282,6 +286,22 @@ impl Plugin {
             |mut caller: Caller<'_, HostState>, idx: i32| -> Result<(), Error> {
                 caller.data_mut().selected =
                     if idx < 0 { None } else { Some(idx as usize) };
+                Ok(())
+            },
+        )?;
+        // set_list：插件声明列表语义（总条数, 选中下标）。负数总数 = 未声明；
+        // 下标由宿主夹到合法范围（空列表归 0）
+        linker.func_wrap(
+            "rmus",
+            "set_list",
+            |mut caller: Caller<'_, HostState>, total: i32, index: i32| -> Result<(), Error> {
+                caller.data_mut().list = if total < 0 {
+                    None
+                } else {
+                    let total = total as usize;
+                    let index = (index.max(0) as usize).min(total.saturating_sub(1));
+                    Some((total, index))
+                };
                 Ok(())
             },
         )?;
@@ -974,6 +994,7 @@ impl Plugin {
         }
         self.store.data_mut().lines.clear();
         self.store.data_mut().selected = None;
+        self.store.data_mut().list = None;
         render.call(&mut self.store, (rows as i32, cols as i32))?;
         Ok(&self.store.data().lines)
     }
@@ -981,6 +1002,11 @@ impl Plugin {
     /// 本轮 `render` 里插件声明的选中行（`rmus_set_selected`；未声明 = None）。
     pub fn take_selected(&self) -> Option<usize> {
         self.store.data().selected
+    }
+
+    /// 本轮 `render` 里插件声明的列表语义（`rmus_set_list`；未声明 = None）。
+    pub fn take_list(&self) -> Option<(usize, usize)> {
+        self.store.data().list
     }
 
     /// 二次 `load`（验证 lifecycle 可重入）。

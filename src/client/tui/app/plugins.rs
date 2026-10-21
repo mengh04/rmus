@@ -37,6 +37,16 @@ impl App {
         });
     }
 
+    /// 插件画布上的语义导航（首/尾/半页）：转发给插件，由插件移动
+    /// 自己的选中项。返回 false = 当前不是插件画布，调用方走本地列表。
+    pub(super) fn send_plugin_nav(&mut self, kind: i32) -> bool {
+        if !self.tab_is_plugin_canvas() {
+            return false;
+        }
+        self.send_tab_key(kind, 0);
+        true
+    }
+
     /// 把搜索关键词交给某个插件（worker 搜索，结果经 PluginView 回）。
     pub(super) fn submit_search(&mut self, plugin: &str, query: &str) {
         self.simple(Request::PluginData {
@@ -53,11 +63,14 @@ impl App {
         plugin: &str,
         lines: Vec<crate::proto::PluginLine>,
         selected: Option<usize>,
+        list: Option<crate::proto::PluginList>,
     ) {
         let ui = self.plugin_uis.entry(plugin.to_string()).or_default();
         ui.view = lines;
         let last = ui.view.len().saturating_sub(1);
         ui.selected = selected.unwrap_or(ui.selected.min(last)).min(last);
+        // 输入态等不画列表的帧不声明：沿用上一帧的列表语义（与 selected 同款）
+        ui.list = list.or(ui.list);
     }
 
     /// 切换 UI 插件的按键映射（v0：Enter/空格/上下/可见字符）。

@@ -42,6 +42,8 @@ mod host {
         pub fn rmus_print_spans(ptr: *const u8, len: u32);
         #[link_name = "set_selected"]
         pub fn rmus_set_selected(idx: i32);
+        #[link_name = "set_list"]
+        pub fn rmus_set_list(total: i32, index: i32);
         #[link_name = "notify"]
         pub fn rmus_notify(ptr: *const u8, len: u32);
         #[link_name = "cancelled"]
@@ -117,6 +119,7 @@ mod host {
         pub unsafe fn rmus_print_line(_ptr: *const u8, _len: u32) {}
         pub unsafe fn rmus_print_spans(_ptr: *const u8, _len: u32) {}
         pub unsafe fn rmus_set_selected(_idx: i32) {}
+        pub unsafe fn rmus_set_list(_total: i32, _index: i32) {}
         pub unsafe fn rmus_notify(_ptr: *const u8, _len: u32) {}
         pub unsafe fn rmus_cancelled() -> i32 {
             0
@@ -719,6 +722,12 @@ pub mod event {
     pub const KIND_DATA: i32 = 7;
     /// 退格键（无 payload）：输入态删一个字符
     pub const KIND_BACKSPACE: i32 = 8;
+    /// 语义导航：跳到首项 / 末项 / 上半页 / 下半页。宿主在插件画布上
+    /// 把 gg、G、C-u、C-d 等映射成这些事件，插件不用自己解析按键。
+    pub const KIND_TOP: i32 = 9;
+    pub const KIND_BOTTOM: i32 = 10;
+    pub const KIND_HALF_UP: i32 = 11;
+    pub const KIND_HALF_DOWN: i32 = 12;
 
     pub fn encode(kind: i32, payload: i32) -> i32 {
         kind | (payload << 8)
@@ -904,6 +913,95 @@ pub mod ui {
         }
         #[cfg(not(target_arch = "wasm32"))]
         let _ = idx;
+    }
+
+    /// 声明当前列表的语义信息：总条数与选中下标（0 起）。宿主的顶栏
+    /// 计数、底栏 `n/N` 统计只认这个声明，不再拿画布行数凑数。
+    /// 每帧 `render` 里都要调用；`total = 0` 表示空列表。
+    pub fn set_list(total: usize, index: usize) {
+        #[cfg(target_arch = "wasm32")]
+        unsafe {
+            super::host::rmus_set_list(total as i32, index as i32);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = (total, index);
+        }
+    }
+
+    /// 一个列表的光标与窗口状态。插件把选中下标和滚动位置都交给它，
+    /// 导航语义（上下/首尾/半页）与窗口计算只写一份。
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct ListState {
+        pub selected: usize,
+        pub scroll: usize,
+    }
+
+    impl ListState {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// 夹紧到 `[0, len)`；空列表归零。
+        pub fn clamp(&mut self, len: usize) {
+            if len == 0 {
+                self.selected = 0;
+                self.scroll = 0;
+            } else {
+                self.selected = self.selected.min(len - 1);
+            }
+        }
+
+        pub fn up(&mut self) {
+            self.selected = self.selected.saturating_sub(1);
+        }
+
+        pub fn down(&mut self, len: usize) {
+            if self.selected + 1 < len {
+                self.selected += 1;
+            }
+        }
+
+        pub fn top(&mut self) {
+            self.selected = 0;
+        }
+
+        pub fn bottom(&mut self, len: usize) {
+            self.selected = len.saturating_sub(1);
+        }
+
+        /// 处理一个导航事件（`KIND_UP` / `KIND_BOTTOM` / …）；返回
+        /// true = 事件已被列表消费。
+        pub fn handle(&mut self, event: i32, len: usize, page: usize) -> bool {
+            let page = page.max(1);
+            match super::event::kind(event) {
+                super::event::KIND_UP => self.up(),
+                super::event::KIND_DOWN => self.down(len),
+                super::event::KIND_TOP => self.top(),
+                super::event::KIND_BOTTOM => self.bottom(len),
+                super::event::KIND_HALF_UP => {
+                    self.selected = self.selected.saturating_sub(page);
+                }
+                super::event::KIND_HALF_DOWN => {
+                    self.selected = (self.selected + page).min(len.saturating_sub(1));
+                }
+                _ => return false,
+            }
+            true
+        }
+
+        /// 每帧绘制前调用：夹紧选中项、算窗口首行，并把画布选中行
+        /// （`header_rows` 是列表前的表头行数）与列表语义声明给宿主。
+        /// 返回窗口首行下标。
+        pub fn prepare(&mut self, len: usize, height: usize, header_rows: usize) -> usize {
+            self.clamp(len);
+            let first = window(&mut self.scroll, self.selected, len, height);
+            if len > 0 {
+                set_selected(header_rows + self.selected - first);
+            }
+            set_list(len, self.selected);
+            first
+        }
     }
 
     /// 列表窗口化：返回可视区首行下标，保证 `selected` 落在窗口内。
@@ -1409,5 +1507,39 @@ mod ui_tests {
         assert_eq!(ui::window(&mut scroll, 1, 100, 10), 1);
         // 空列表归零
         assert_eq!(ui::window(&mut scroll, 0, 0, 10), 0);
+    }
+
+    #[test]
+    fn list_state_导航语义() {
+        use super::event::{encode, KIND_BOTTOM, KIND_DOWN, KIND_HALF_DOWN, KIND_HALF_UP, KIND_UP};
+        let mut l = ui::ListState::new();
+        assert!(l.handle(encode(KIND_DOWN, 0), 100, 10));
+        assert_eq!(l.selected, 1);
+        assert!(l.handle(encode(KIND_BOTTOM, 0), 100, 10));
+        assert_eq!(l.selected, 99);
+        assert!(l.handle(encode(KIND_UP, 0), 100, 10));
+        assert_eq!(l.selected, 98);
+        assert!(l.handle(encode(KIND_HALF_UP, 0), 100, 10));
+        assert_eq!(l.selected, 88);
+        assert!(l.handle(encode(KIND_HALF_DOWN, 0), 100, 10));
+        assert_eq!(l.selected, 98);
+        // 未知事件不消费
+        assert!(!l.handle(encode(super::event::KIND_CHAR, 'x' as i32), 100, 10));
+    }
+
+    #[test]
+    fn list_state_窗口与空列表() {
+        let mut l = ui::ListState::new();
+        l.selected = 25;
+        // 窗口跟随：选中项落到底部
+        assert_eq!(l.prepare(100, 10, 3), 16);
+        assert_eq!(l.scroll, 16);
+        // 列表缩短后夹紧
+        l.prepare(5, 10, 3);
+        assert_eq!(l.selected, 4);
+        // 空列表归零
+        l.prepare(0, 10, 3);
+        assert_eq!(l.selected, 0);
+        assert_eq!(l.scroll, 0);
     }
 }

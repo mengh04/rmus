@@ -56,9 +56,12 @@ fn left_line(app: &App, theme: &Theme, width: u16) -> Line<'static> {
             Tab::Queue => app.queue.len(),
             Tab::Library => app.library.len(),
             Tab::Playlists => app.playlists.len(),
-            Tab::Plugin(_) | Tab::Plugins => {
-                app.tab_ui(&tab).map_or(0, |ui| ui.view.len())
-            }
+            // 插件画布：只认插件声明的列表总数；旧插件不声明就显示 0，
+            // 不能拿画布行数（≈ 终端高度）冒充列表长度
+            Tab::Plugin(_) | Tab::Plugins => app
+                .tab_ui(&tab)
+                .and_then(|ui| ui.list)
+                .map_or(0, |l| l.total),
         };
         let label = format!(" {} {} {} ", i + 1, tab.title(), count);
         let w = label.width() as u16;

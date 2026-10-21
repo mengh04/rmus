@@ -19,8 +19,8 @@ impl App {
     }
 
     pub(super) fn move_selection(&mut self, delta: i32) {
-        // 插件画布：选中态在插件侧，导航键直接转发
-        if matches!(self.tab, Tab::Plugin(_)) {
+        // 插件画布（注册 tab 与「插件」面板）：选中态在插件侧，导航键直接转发
+        if self.tab_is_plugin_canvas() {
             let kind = if delta < 0 {
                 crate::proto::plugin_key::KIND_UP
             } else {

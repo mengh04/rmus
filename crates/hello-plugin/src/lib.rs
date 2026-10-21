@@ -24,6 +24,7 @@ fn draw(cols: i32) {
     // 标题行：组件 header
     ui::header("hello 组件演示", "组件表 v0");
     ui::set_selected(1 + selected);
+    ui::set_list(DEMO_ITEMS.len(), selected);
 
     // 列表：组件 list_row_custom（前缀 = 序号）
     for (i, item) in DEMO_ITEMS.iter().enumerate() {

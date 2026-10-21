@@ -74,6 +74,12 @@ pub mod plugin_key {
     pub const KIND_DATA: i32 = 7;
     /// 退格键（无 payload）；插件画布的输入态靠它删字符
     pub const KIND_BACKSPACE: i32 = 8;
+    /// 语义导航：首项 / 末项 / 上半页 / 下半页。宿主把插件画布上的
+    /// gg、G、C-u、C-d 等映射成这些事件，选中状态与滚动仍归插件。
+    pub const KIND_TOP: i32 = 9;
+    pub const KIND_BOTTOM: i32 = 10;
+    pub const KIND_HALF_UP: i32 = 11;
+    pub const KIND_HALF_DOWN: i32 = 12;
 
     pub fn encode(kind: i32, payload: i32) -> i32 {
         kind | (payload << 8)
@@ -224,12 +230,23 @@ pub enum Event {
         /// 插件声明的选中行（画布行号；插件未声明 = None，宿主沿用旧值）
         #[serde(default)]
         selected: Option<usize>,
+        /// 插件声明的列表语义（总条数 / 选中下标）；旧插件不声明 = None，
+        /// 宿主不再拿画布行数冒充列表长度
+        #[serde(default)]
+        list: Option<PluginList>,
     },
     /// 播放错误：解码失败 / 整个队列都播不了。引擎已按策略跳过或停止，
     /// 客户端负责告诉用户发生了什么（daemon 自身的 stderr 可能是 /dev/null）。
     Error {
         message: String,
     },
+}
+
+/// UI 插件声明的当前列表语义（`rmus.set_list`）。`index` 是 0 起下标。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginList {
+    pub total: usize,
+    pub index: usize,
 }
 
 /// UI 插件渲染输出的一行。行内是带语义样式的 span 序列；

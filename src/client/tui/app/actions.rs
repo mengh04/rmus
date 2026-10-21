@@ -37,10 +37,28 @@ impl App {
             }
             Up => self.move_selection(-1),
             Down => self.move_selection(1),
-            Top => self.set_selection(0),
-            Bottom => self.set_selection(usize::MAX),
-            HalfUp => self.move_selection(-7),
-            HalfDown => self.move_selection(7),
+            // 插件画布的选中/滚动归插件：首尾与半页发语义事件，宿主
+            // 不再改画布行号（旧实现会把高亮挪到"看得见的最后一行"）
+            Top => {
+                if !self.send_plugin_nav(crate::proto::plugin_key::KIND_TOP) {
+                    self.set_selection(0);
+                }
+            }
+            Bottom => {
+                if !self.send_plugin_nav(crate::proto::plugin_key::KIND_BOTTOM) {
+                    self.set_selection(usize::MAX);
+                }
+            }
+            HalfUp => {
+                if !self.send_plugin_nav(crate::proto::plugin_key::KIND_HALF_UP) {
+                    self.move_selection(-7);
+                }
+            }
+            HalfDown => {
+                if !self.send_plugin_nav(crate::proto::plugin_key::KIND_HALF_DOWN) {
+                    self.move_selection(7);
+                }
+            }
             LocateInLibrary => self.locate_selected_in_library(),
             PlaySelected => self.play_selected(),
             PlayToggle => self.simple(Request::TogglePlay),

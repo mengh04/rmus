@@ -57,30 +57,54 @@ fn collect_dir(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 fn item_for(path: &Path) -> QueueItem {
-    let (title, artist, album, duration_ms) = read_metadata(path).unwrap_or_else(|| {
-        let title = path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
-        (title, String::new(), String::new(), 0)
-    });
+    let (title, artist, album, duration_ms) =
+        read_metadata(path).unwrap_or_else(|| (String::new(), String::new(), String::new(), 0));
     QueueItem {
         path: path.to_path_buf(),
-        title,
+        // 有 tag 但 title 为空很常见（播客转码常只剩 encoder/date）：
+        // 逐字段兜底到文件名，别只在"完全无 tag"时才回退
+        title: title_or_stem(title, path),
         artist,
         album,
         duration_ms,
     }
 }
 
+fn title_or_stem(title: String, path: &Path) -> String {
+    if !title.is_empty() {
+        return title;
+    }
+    path.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// 读出 (title, artist, album, duration)。文件能 probe 就返回，
+/// 即使没有任何 tag——时长仍然有效，标题由调用方回退到文件名。
 fn read_metadata(path: &Path) -> Option<(String, String, String, u64)> {
     let tagged = Probe::open(path).ok()?.read().ok()?;
     let duration_ms = tagged.properties().duration().as_millis() as u64;
-    let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
+    let tag = tagged.primary_tag().or_else(|| tagged.first_tag());
     Some((
-        tag.title().map(|t| t.into_owned()).unwrap_or_default(),
-        tag.artist().map(|t| t.into_owned()).unwrap_or_default(),
-        tag.album().map(|t| t.into_owned()).unwrap_or_default(),
+        tag.and_then(|t| t.title().map(|v| v.into_owned()))
+            .unwrap_or_default(),
+        tag.and_then(|t| t.artist().map(|v| v.into_owned()))
+            .unwrap_or_default(),
+        tag.and_then(|t| t.album().map(|v| v.into_owned()))
+            .unwrap_or_default(),
         duration_ms,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 空标题回退到文件名() {
+        let path = Path::new("/tmp/某播客/新作井喷，核周报 10.17.mp3");
+        assert_eq!(title_or_stem(String::new(), path), "新作井喷，核周报 10.17");
+        // 有标题就保留 tag 的
+        assert_eq!(title_or_stem("真标题".into(), path), "真标题");
+    }
 }

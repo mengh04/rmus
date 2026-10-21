@@ -692,10 +692,14 @@ fn spawn_wasm_session(
                                 })
                                 .collect();
                             let selected = plugin.take_selected();
+                            let list = plugin.take_list().map(|(total, index)| {
+                                rmus::proto::PluginList { total, index }
+                            });
                             let _ = events_tx.send(Event::PluginView {
                                 plugin: name.clone(),
                                 lines,
                                 selected,
+                                list,
                             });
                         }
                         WasmMsg::Call {
@@ -778,10 +782,14 @@ fn spawn_wasm_session(
                                     })
                                     .collect();
                                 let selected = plugin.take_selected();
+                                let list = plugin.take_list().map(|(total, index)| {
+                                    rmus::proto::PluginList { total, index }
+                                });
                                 let _ = events_tx.send(Event::PluginView {
                                     plugin: name.clone(),
                                     lines,
                                     selected,
+                                    list,
                                 });
                             }
                         }
