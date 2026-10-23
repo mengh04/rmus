@@ -201,6 +201,7 @@ impl PluginHost {
                 "version": d.manifest.version,
                 "ui": d.manifest.ui,
                 "tab": d.manifest.tab,
+                "cli": d.manifest.cli,
                 "methods": d.manifest.methods,
             })).collect::<Vec<_>>()
         })

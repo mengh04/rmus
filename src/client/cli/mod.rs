@@ -5,6 +5,7 @@
 
 mod format;
 mod playlist;
+pub(crate) mod plugin_cli;
 
 use crate::{Cli, Command, Lib, Pl};
 use anyhow::{Context, Result, bail};
@@ -187,6 +188,7 @@ pub(crate) fn run(mut cli: Cli) -> Result<()> {
         Command::Restart => {
             restart(&cli)?;
         }
+        Command::Plugin { entry, args } => plugin_cli::run(&cli, entry, args)?,
         Command::Plugins => {
             // restart 已退出读循环，这里重连一次
             let mut client = connect(&cli)?;
@@ -213,7 +215,12 @@ pub(crate) fn run(mut cli: Cli) -> Result<()> {
                     })
                     .unwrap_or_default();
                 let kind = if ui { " [UI]" } else { "" };
-                println!("{name} {version}{kind}  {}", methods.join(", "));
+                let entry = p
+                    .get("cli")
+                    .and_then(|v| v.as_str())
+                    .map(|e| format!(" [-{e}]"))
+                    .unwrap_or_default();
+                println!("{name} {version}{kind}{entry}  {}", methods.join(", "));
             }
         }
     }

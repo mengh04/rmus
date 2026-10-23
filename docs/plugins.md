@@ -123,12 +123,22 @@ kugou 搜索期给不出（下载时查 songinfo 补齐）。客户端据此在�
 
 | 请求 | 响应 result | 说明 |
 | --- | --- | --- |
-| `plugin_list` | `{"plugins":[{name,version,methods:[{name,kind}]}]}` | 已发现插件 |
+| `plugin_list` | `{"plugins":[{name,version,ui,tab,cli,methods:[{name,kind}]}]}` | 已发现插件 |
 | `plugin_call` `{plugin,method,params}` | call：插件原样 JSON；task：`{"call":N}` | 调用 |
 | `plugin_cancel` `{plugin,call}` | `{"cancelled":bool}` 或 error | 取消任务 |
 
 事件 `{"event":"plugin","data":{plugin, call, data}}`：插件通知原样透传 +
 宿主包装的 done/failed。
+
+### 命令行入口（`rmus -<名> …`）
+
+manifest 的 `"cli"` 字段宣告客户端命令行入口名（如 `"dl"` →
+`rmus -dl …`；客户端只认单破折号 + `[a-z0-9-]` 词，不与长旗标冲突）。
+客户端按入口名找到插件后，把参数打包 `{"args":[…]}` 调它的 `cli` 方法：
+进度事件渲染到 stderr，完结包 `done`/`failed` 渲染到 stdout。`--json`
+是客户端旗标（不转发给插件）：结果原样打印；结果含非空 `failed` 项时
+客户端以非零码退出（已落盘的文件不受影响）。参考实现见 rmus-dl 插件
+（`--list` / `--pick N` / `--json` / `--help`）。
 
 ## 插件 UI 画布（wasm 插件）
 

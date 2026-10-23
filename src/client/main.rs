@@ -6,6 +6,7 @@ mod cli;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -82,6 +83,21 @@ enum Command {
     Restart,
     /// 列出已发现的插件
     Plugins,
+    /// 插件命令行入口：`rmus -dl …` 由 main() 预处理改写到这，参数原样
+    /// 转发（入口名 = 插件 manifest 的 cli 字段）。禁自身 help/version：
+    /// `-h`/`--help` 之类一律转发给插件。
+    #[command(
+        hide = true,
+        disable_help_flag = true,
+        disable_version_flag = true
+    )]
+    Plugin {
+        /// 入口名
+        entry: String,
+        /// 原样转发给插件的参数
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -109,5 +125,36 @@ enum Lib {
 }
 
 fn main() -> Result<()> {
-    cli::run(Cli::parse())
+    // `rmus -dl …` → `rmus plugin dl …`：单破折号 + 词是插件命令行入口
+    //（客户端自身只有长旗标 --socket/--no-spawn，不会撞）
+    cli::run(Cli::parse_from(rewrite_plugin_entry(std::env::args_os().collect())))
+}
+
+/// 把首个插件入口旗标 `-<词>` 改写成隐藏子命令 `plugin <词>`。只看最前面
+/// 的全局旗标之后的第一个词，不是入口旗标就原样交还 clap（`rmus play -dl`
+/// 不受影响）。
+fn rewrite_plugin_entry(mut args: Vec<OsString>) -> Vec<OsString> {
+    let ok = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-';
+    let mut i = 1;
+    while i < args.len() {
+        let Some(tok) = args[i].to_str().map(str::to_owned) else { break };
+        match tok.as_str() {
+            "--socket" => i += 2,
+            "--no-spawn" => i += 1,
+            _ => {
+                if let Some(word) = tok.strip_prefix('-') {
+                    let is_entry = word.len() > 1
+                        && word.starts_with(ok)
+                        && word.chars().all(ok)
+                        && !matches!(word, "help" | "version");
+                    if is_entry {
+                        args[i] = OsString::from("plugin");
+                        args.insert(i + 1, OsString::from(word));
+                    }
+                }
+                break;
+            }
+        }
+    }
+    args
 }

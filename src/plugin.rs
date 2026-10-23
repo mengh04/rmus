@@ -81,6 +81,11 @@ pub struct PluginManifest {
     /// （只在「插件」清单里出现）。tab 栏随插件装卸动态增减。
     #[serde(default)]
     pub tab: Option<String>,
+    /// 客户端命令行入口名（如 `"dl"` 对应 `rmus -dl …`）；None = 无
+    /// 命令行入口。客户端按入口名找到插件后，把参数打包 `{"args":[…]}`
+    /// 调它的 `cli` 方法（进度走 Event::Plugin，完结包 done/failed）。
+    #[serde(default)]
+    pub cli: Option<String>,
 }
 
 impl PluginManifest {
@@ -100,6 +105,11 @@ impl PluginManifest {
         }
         if self.methods.iter().any(|m| m.name.is_empty()) {
             return Err("方法名不能为空".into());
+        }
+        if let Some(cli) = &self.cli
+            && (cli.is_empty() || !cli.chars().all(ok))
+        {
+            return Err(format!("非法命令行入口名 “{cli}”"));
         }
         Ok(())
     }
@@ -209,6 +219,13 @@ mod tests {
         let m2: PluginManifest =
             serde_json::from_str(r#"{"name":"x","version":"1","methods":[{"name":"a"}]}"#).unwrap();
         assert_eq!(m2.method_kind("a"), Some(MethodKind::Call));
+        // cli 入口：缺省 None；宣告了就解析出来
+        assert_eq!(m2.cli, None);
+        let m3: PluginManifest = serde_json::from_str(
+            r#"{"name":"dl","version":"1","cli":"dl","methods":[{"name":"cli"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(m3.cli.as_deref(), Some("dl"));
     }
 
     #[test]
@@ -223,5 +240,11 @@ mod tests {
         )
         .unwrap();
         assert!(bad.validate().is_err());
+        // 入口名跟插件名同一字符集
+        let bad_cli: PluginManifest = serde_json::from_str(
+            r#"{"name":"dl","version":"1","cli":"下载","methods":[]}"#,
+        )
+        .unwrap();
+        assert!(bad_cli.validate().is_err());
     }
 }
