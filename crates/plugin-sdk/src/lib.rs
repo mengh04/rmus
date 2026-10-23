@@ -1193,6 +1193,11 @@ macro_rules! methods_json {
 /// }
 /// ```
 ///
+/// 混合形态可再带 `cli: "<名>"`（如 `cli: "dl"`）：manifest 追加
+/// `"cli":"<名>"` 字段，宣告一个命令行入口；配套在 `methods` 里声明
+/// `("cli", "task")` 方法，客户端把 `rmus -<名> <参数...>` 的参数经该方法
+/// 转发给插件（参数形状 `{"args":[...]}`，kind=task 走进度回包）。
+///
 /// 用在 crate 根；一个 crate 只能声明一次。
 #[macro_export]
 macro_rules! declare_plugin_manifest {
@@ -1222,6 +1227,85 @@ macro_rules! declare_plugin_manifest {
         static MANIFEST: &str = concat!(
             "{\"name\":\"", $name, "\",\"version\":\"", $ver,
             "\",\"ui\":true,\"tab\":\"", $tab, "\",\"methods\":[",
+            $crate::methods_json!$methods,
+            "]}"
+        );
+
+        #[unsafe(no_mangle)]
+        pub extern "C" fn manifest_ptr() -> *const u8 {
+            MANIFEST.as_ptr()
+        }
+
+        #[unsafe(no_mangle)]
+        pub extern "C" fn manifest_len() -> u32 {
+            MANIFEST.len() as u32
+        }
+
+        #[unsafe(no_mangle)]
+        pub extern "C" fn load() {}
+
+        /// 请求缓冲：宿主经 alloc 拿指针写参数。单线程模型下复用一份。
+        static mut REQUEST: Vec<u8> = Vec::new();
+
+        #[unsafe(no_mangle)]
+        pub extern "C" fn alloc(len: i32) -> *mut u8 {
+            if len <= 0 {
+                return core::ptr::null_mut();
+            }
+            // 单线程假设（见模块文档）；static_mut_refs 规避用 addr_of_mut
+            let buf: &mut Vec<u8> = unsafe { &mut *core::ptr::addr_of_mut!(REQUEST) };
+            buf.clear();
+            buf.resize(len as usize, 0);
+            buf.as_mut_ptr()
+        }
+
+        /// 执行一个请求行。恰好发一个回包；返回非 0 = 异常失败（宿主直接报错）。
+        #[unsafe(no_mangle)]
+        pub extern "C" fn call(ptr: *const u8, len: i32) -> i32 {
+            if len < 0 {
+                return 1;
+            }
+            let bytes: &[u8] = unsafe {
+                let buf: &mut Vec<u8> = &mut *core::ptr::addr_of_mut!(REQUEST);
+                if ptr != buf.as_ptr() {
+                    return 1;
+                }
+                buf.get(..len as usize).unwrap_or(&[])
+            };
+            let run = || -> Result<(), String> {
+                let request: serde_json::Value =
+                    serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+                let method = request
+                    .get("method")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let params = request.get("params").cloned().unwrap_or_default();
+                // 错误按 Display 转 String（String / anyhow::Error 都兼容）
+                let reply = match $handle(&method, &params) {
+                    Ok(result) => serde_json::json!({ "result": result }),
+                    Err(error) => serde_json::json!({ "error": error.to_string() }),
+                };
+                let line = serde_json::to_vec(&reply).map_err(|e| e.to_string())?;
+                $crate::send_reply(&line);
+                Ok(())
+            };
+            match run() {
+                Ok(()) => 0,
+                Err(_) => 1,
+            }
+        }
+    };
+
+    // 混合形态 + tab 注册 + 命令行入口（manifest 带 cli 字段，见宏文档）
+    (
+        name: $name:literal, version: $ver:literal, ui: true, tab: $tab:literal,
+        cli: $cli:literal, methods: $methods:tt, handle: $handle:path $(,)?
+    ) => {
+        static MANIFEST: &str = concat!(
+            "{\"name\":\"", $name, "\",\"version\":\"", $ver,
+            "\",\"ui\":true,\"tab\":\"", $tab,
+            "\",\"cli\":\"", $cli, "\",\"methods\":[",
             $crate::methods_json!$methods,
             "]}"
         );
@@ -1465,6 +1549,29 @@ macro_rules! declare_plugin_manifest {
             }
         }
     };
+}
+
+#[cfg(test)]
+mod manifest_tests {
+    fn cli_handle(_method: &str, _params: &serde_json::Value) -> Result<serde_json::Value, String> {
+        Ok(serde_json::json!({}))
+    }
+
+    // cli 臂：manifest JSON 带上 cli 字段，方法表照常拼接
+    crate::declare_plugin_manifest! {
+        name: "rmus-dl", version: "0.3.2", ui: true, tab: "在线", cli: "dl",
+        methods: [("search", "call"), ("cli", "task")],
+        handle: cli_handle,
+    }
+
+    #[test]
+    fn manifest_cli_入口字段() {
+        assert_eq!(
+            MANIFEST,
+            "{\"name\":\"rmus-dl\",\"version\":\"0.3.2\",\"ui\":true,\"tab\":\"在线\",\"cli\":\"dl\",\"methods\":[{\"name\":\"search\",\"kind\":\"call\"},{\"name\":\"cli\",\"kind\":\"task\"}]}"
+        );
+        assert_eq!(manifest_len() as usize, MANIFEST.len());
+    }
 }
 
 #[cfg(test)]
