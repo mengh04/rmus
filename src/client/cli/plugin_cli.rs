@@ -129,6 +129,26 @@ fn finish(result: &serde_json::Value, as_json: bool) -> Result<()> {
                 size(s.get("size_bytes")),
             );
         }
+    } else if result.get("added").is_some() {
+        // dj 一轮的结果：added / skipped / failed 三清单 + summary
+        let added = result.get("added").and_then(|v| v.as_array());
+        let skipped = result.get("skipped").and_then(|v| v.as_array());
+        for a in added.into_iter().flatten() {
+            println!("✓ {} - {} → {}", get(a, "title"), get(a, "artist"), get(a, "path"));
+        }
+        for s in skipped.into_iter().flatten() {
+            println!("· {} - {} — {}", get(s, "title"), get(s, "artist"), get(s, "reason"));
+        }
+        let failed = result.get("failed").and_then(|v| v.as_array());
+        for f in failed.into_iter().flatten() {
+            println!("✗ {} - {}：{}", get(f, "title"), get(f, "artist"), get(f, "reason"));
+        }
+        if let Some(summary) = result.get("summary").and_then(|v| v.as_str()) {
+            println!("{summary}");
+        }
+    } else if let Some(status) = result.get("status_text").and_then(|v| v.as_str()) {
+        // 插件自述状态（dj --status 等）
+        println!("{status}");
     } else {
         let downloaded = result.get("downloaded").and_then(|v| v.as_array());
         let failed = result.get("failed").and_then(|v| v.as_array());

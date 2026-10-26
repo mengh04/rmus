@@ -44,6 +44,8 @@ struct Inner {
     events_tx: broadcast::Sender<Event>,
     /// 引擎命令通道：插件 daemon RPC（白名单）经它进引擎
     cmd_tx: std::sync::mpsc::Sender<ToEngine>,
+    /// 库索引（daemon 层请求 Find / LibList 就地回，不进引擎）
+    library: crate::Library,
 }
 
 /// wasm 插件会话的一帧输入：UI 按键、方法调用。（取消不进通道——
@@ -119,6 +121,7 @@ impl PluginHost {
     pub async fn discover(
         events_tx: broadcast::Sender<Event>,
         cmd_tx: std::sync::mpsc::Sender<ToEngine>,
+        library: crate::Library,
     ) -> Self {
         let mut candidates: Vec<PathBuf> = Vec::new();
         for dir in plugin::plugin_dirs() {
@@ -187,6 +190,7 @@ impl PluginHost {
             wasm_sessions: Arc::new(Mutex::new(HashMap::new())),
             events_tx,
             cmd_tx,
+            library,
         }));
         spawn_daemon_event_bridge(host.0.events_tx.clone(), host.0.wasm_sessions.clone());
         tokio::spawn(reaper(host.clone()));
@@ -230,6 +234,7 @@ impl PluginHost {
                 found.path.clone(),
                 self.0.events_tx.clone(),
                 self.0.cmd_tx.clone(),
+                self.0.library.clone(),
             )
             .map_err(|e| e.to_string())?;
             sessions.insert(name.to_string(), session);
@@ -519,6 +524,7 @@ fn wasm_handshake(path: PathBuf) -> anyhow::Result<Option<Discovered>> {
 fn daemon_rpc_bridge(
     name: String,
     cmd_tx: std::sync::mpsc::Sender<ToEngine>,
+    library: crate::Library,
 ) -> wasm_host::DaemonFn {
     let (rpc_tx, rpc_rx) = std::sync::mpsc::channel::<(
         serde_json::Value,
@@ -528,7 +534,7 @@ fn daemon_rpc_bridge(
         .name(format!("rmus-daemon-rpc-{name}"))
         .spawn(move || {
             while let Ok((request, rtx)) = rpc_rx.recv() {
-                let reply = execute_daemon_rpc(&cmd_tx, request);
+                let reply = execute_daemon_rpc(&cmd_tx, &library, request);
                 let _ = rtx.send(reply);
             }
         })
@@ -543,11 +549,15 @@ fn daemon_rpc_bridge(
 }
 
 /// 插件的 daemon RPC 白名单执行。请求是协议 Request 的 tagged JSON——
-/// 先解析（形态非法即拒绝），再按变体过白名单。v1：Status（进度采样）、
-/// Peek（点播/连播的无缝切集）、Back（结束试听）。其余一律拒绝——插件
-/// 不该摸到管理类操作（清队列/重扫库/退出）。
+/// 先解析（形态非法即拒绝），再按变体过白名单。v2：
+/// - Status / QueueList / PlaylistsList / Back：直通引擎
+/// - Peek：点播/连播的无缝切集（daemon 层扫描后进引擎）
+/// - Find / LibList：查库索引就地回（不进引擎）
+/// - PlaylistAdd / Add：扫描后进引擎（推荐插件入库/插队列用）
+/// 其余一律拒绝——插件不该摸到管理类操作（清队列/重扫库/退出）。
 fn execute_daemon_rpc(
     cmd_tx: &std::sync::mpsc::Sender<ToEngine>,
+    library: &crate::Library,
     request: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     use rmus::proto::Request;
@@ -556,7 +566,10 @@ fn execute_daemon_rpc(
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     let sent = match request {
         // 直通引擎的查询/控制
-        Request::Status | Request::QueueList | Request::Back => cmd_tx
+        Request::Status
+        | Request::QueueList
+        | Request::PlaylistsList
+        | Request::Back => cmd_tx
             .send(ToEngine::Request {
                 id: 0,
                 request,
@@ -578,8 +591,74 @@ fn execute_daemon_rpc(
                 })
                 .is_ok()
         }
+        // 加文件到队列尾部（扫描后进引擎；推荐插件“现在就播”用）
+        Request::Add { paths } => {
+            let items = rmus::scan::collect(&paths);
+            cmd_tx
+                .send(ToEngine::AddScanned {
+                    id: 0,
+                    items,
+                    reply: reply_tx,
+                })
+                .is_ok()
+        }
+        // 加文件到播放列表（扫描后进引擎；不存在则创建）
+        Request::PlaylistAdd { name, paths } => {
+            let items = rmus::scan::collect(&paths);
+            cmd_tx
+                .send(ToEngine::PlaylistAddScanned {
+                    id: 0,
+                    name,
+                    items,
+                    reply: reply_tx,
+                })
+                .is_ok()
+        }
+        // 库模糊搜索：查索引就地回（同 dispatch 的 Find，限 10 条）
+        Request::Find { query } => {
+            let tracks = {
+                let lib = library.read().unwrap();
+                rmus::library::matches(&lib, &query)
+                    .into_iter()
+                    .take(10)
+                    .enumerate()
+                    .map(|(i, item)| rmus::proto::TrackInfo {
+                        index: i,
+                        path: item.path.clone(),
+                        title: item.title.clone(),
+                        artist: item.artist.clone(),
+                        album: item.album.clone(),
+                        duration_ms: item.duration_ms,
+                    })
+                    .collect()
+            };
+            return serde_json::to_value(rmus::proto::Reply::Matches { tracks })
+                .map_err(|e| e.to_string());
+        }
+        // 整库列表：查索引就地回（推荐插件建画像用）
+        Request::LibList => {
+            let tracks = {
+                let lib = library.read().unwrap();
+                lib.iter()
+                    .enumerate()
+                    .map(|(i, entry)| rmus::proto::TrackInfo {
+                        index: i,
+                        path: entry.item.path.clone(),
+                        title: entry.item.title.clone(),
+                        artist: entry.item.artist.clone(),
+                        album: entry.item.album.clone(),
+                        duration_ms: entry.item.duration_ms,
+                    })
+                    .collect()
+            };
+            return serde_json::to_value(rmus::proto::Reply::Matches { tracks })
+                .map_err(|e| e.to_string());
+        }
         _other => {
-            return Err("插件无权调用该请求（白名单仅 Status/Peek/Back）".into());
+            return Err(
+                "插件无权调用该请求（白名单：Status/QueueList/PlaylistsList/Peek/Add/PlaylistAdd/Find/LibList/Back）"
+                    .into(),
+            );
         }
     };
     if !sent {
@@ -628,6 +707,7 @@ fn spawn_wasm_session(
     path: PathBuf,
     events_tx: broadcast::Sender<Event>,
     cmd_tx: std::sync::mpsc::Sender<ToEngine>,
+    library: crate::Library,
 ) -> anyhow::Result<WasmSession> {
     let (tx, rx) = std::sync::mpsc::channel::<WasmMsg>();
     let wasm = std::fs::read(&path).context("无法读取 wasm 文件")?;
@@ -645,7 +725,7 @@ fn spawn_wasm_session(
     };
     let mut plugin = WasmPlugin::new(&wasm, notify_events).context("实例化失败")?;
     plugin.set_lib_dir(rmus::library::root());
-    plugin.set_daemon_call(daemon_rpc_bridge(name.clone(), cmd_tx.clone()));
+    plugin.set_daemon_call(daemon_rpc_bridge(name.clone(), cmd_tx.clone(), library));
     plugin.set_data_dir(rmus::plugin::data_root());
     // 最近一次按键的视口（Data 事件重绘用；默认 24×80）
     let mut viewport: u64 = ((24u64) << 16) | 80;

@@ -374,8 +374,11 @@ pub fn data_dir() -> String {
 
 /// daemon RPC（宿主代理，白名单直通引擎）。
 ///
-/// 白名单 v1：`Status`（进度采样）/ `Peek`（试听态播放，播客点播与连播
-/// 都靠它）/ `Back`（结束试听）。其余请求宿主侧一律拒绝。
+/// 白名单 v2：`Status`（进度采样）/ `Peek`（试听态播放，播客点播与连播
+/// 都靠它）/ `Back`（结束试听）/ `QueueList`（队列）/ `PlaylistsList`
+/// （播放列表名）/ `Find`（库模糊搜索，限 10 条）/ `LibList`（整库列
+/// 表，画像用）/ `Add`（加到队列尾）/ `PlaylistAdd`（加到播放列表，不
+/// 存在则创建）。其余请求宿主侧一律拒绝。
 pub mod daemon {
     use super::host;
 
@@ -428,6 +431,36 @@ pub mod daemon {
     /// 提前结束试听，恢复进入前的状态。
     pub fn back() -> Result<serde_json::Value, String> {
         call(serde_json::json!({ "method": "back" }))
+    }
+
+    /// 当前队列（Reply::Queue：`{"tracks":[TrackInfo…]}`）。
+    pub fn queue_list() -> Result<serde_json::Value, String> {
+        call(serde_json::json!({ "method": "queue_list" }))
+    }
+
+    /// 播放列表名与当前来源（`{"names":[…],"current":…}`）。
+    pub fn playlists() -> Result<serde_json::Value, String> {
+        call(serde_json::json!({ "method": "playlists_list" }))
+    }
+
+    /// 库模糊搜索，限 10 条（`{"tracks":[TrackInfo…]}`，相关度降序）。
+    pub fn find(query: &str) -> Result<serde_json::Value, String> {
+        call(serde_json::json!({ "method": "find", "params": { "query": query } }))
+    }
+
+    /// 整库列表（`{"tracks":[TrackInfo…]}`；推荐插件建口味画像用）。
+    pub fn lib_list() -> Result<serde_json::Value, String> {
+        call(serde_json::json!({ "method": "lib_list" }))
+    }
+
+    /// 加文件/目录到队列尾部（扫描在宿主侧完成）。
+    pub fn add(paths: Vec<String>) -> Result<serde_json::Value, String> {
+        call(serde_json::json!({ "method": "add", "params": { "paths": paths } }))
+    }
+
+    /// 加文件/目录到播放列表（不存在则创建；返回 `{"added":N}`）。
+    pub fn playlist_add(name: &str, paths: Vec<String>) -> Result<serde_json::Value, String> {
+        call(serde_json::json!({ "method": "playlist_add", "params": { "name": name, "paths": paths } }))
     }
 }
 
