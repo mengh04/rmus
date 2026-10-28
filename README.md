@@ -47,9 +47,11 @@ Run `rmus` with no subcommand to open the interactive player:
   by an accent bar and the selection by a raised row; long titles truncate with an ellipsis
 - Library: everything indexed from `~/Music`; `Enter` jump-plays a track, `a` appends it to the
   queue without interrupting playback
-- Playlists: the active playlist carries a `当前` badge
+- Playlists: the queue's source playlist carries a `当前` badge; a `*` after the queue name in the
+  top bar means the queue has drifted from that playlist (edited, reordered, or appended)
 - Bottom: now-playing title line plus a full-width progress bar (elapsed / total)
-- `/` fuzzy library search, `:` command palette, `?` scrollable help sheet, `w` save the queue
+- `/` fuzzy library search, `:` command palette, `?` scrollable help sheet, `w` saves the queue as
+  a playlist
 - The layout collapses gracefully as the window narrows: album column, then artist column, then
   the secondary status readouts drop out; the terminal title follows the current track
 
@@ -69,8 +71,10 @@ Run `rmus` with no subcommand to open the interactive player:
 - `u` undoes the last queue change (delete, clear, shuffle, reorder, insert), `C-r` redoes
 - `J` / `K` move the selected track down / up inside the queue; the cursor follows the track
 - `D` / `x` remove the playing one, `C` clears, `S` shuffles
-- `c` renames the current queue (an anonymous queue gets its first name; a named one keeps its
-  history under the new name)
+- `A` (library) adds the selected tracks to a playlist picked from a candidate list (`v` first for a
+  range); `a` still appends to the queue
+- `c` (queue view) saves the queue as a playlist — keep the prefilled name to overwrite its source
+  playlist, type a different one to save a separate copy; `w` does the same from anywhere
 - `gd` locates the selected queue track in the library view
 - In the search overlay: `Esc` toggles between input and a vim-like normal mode. In normal mode
   `j`/`k` move, `gg`/`G` jump, `Enter` jump-plays, `o` plays it after the current track, `a`
@@ -78,7 +82,20 @@ Run `rmus` with no subcommand to open the interactive player:
   to the query; in input mode the same actions live on `Enter` / `C-o` / `Tab` / `C-g`, with
   `C-u` clearing the query and `C-w` deleting the last word
 - `[` / `]` seek 10 seconds back / forward
-- In the playlists view, `c` renames and `d` deletes the selected playlist
+- In the playlists view, `c` renames and `d` deletes the selected playlist, `Enter` plays it
+
+### Queue and playlists are separate things
+
+The queue is what plays; a playlist is a saved set of tracks. They meet in exactly three places:
+
+- playing a playlist **copies** its tracks into the queue (the playlist becomes the queue's source,
+  shown in the top bar)
+- changing the queue — append, remove, reorder, shuffle, undo — **never** writes back to any
+  playlist; the top bar marks a drifted queue with `*`
+- `w` / `c` **saves** the queue into a playlist (an existing name asks for confirmation first), and
+  `A` **adds** to a playlist without disturbing the queue
+
+So building a playlist never interrupts or rewrites what you're listening to.
 
 While an overlay is open the terminal cursor moves into its input line; everywhere else it is hidden.
 

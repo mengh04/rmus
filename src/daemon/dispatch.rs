@@ -195,7 +195,7 @@ pub(crate) async fn dispatch(
             *lib.write().unwrap() = items;
             let json = serde_json::to_string(&ServerMsg::Reply {
                 id,
-                result: Reply::Added { added },
+                result: Reply::Added { added, skipped: 0 },
             })
             .unwrap_or_default();
             let _ = out_tx.send(json);

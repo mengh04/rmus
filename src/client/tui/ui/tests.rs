@@ -32,6 +32,7 @@ fn demo_app() -> App {
         repeat: RepeatMode::All,
         random: false,
         queue_name: Some("深夜循环".into()),
+        queue_modified: true,
         peeking: false,
     });
     app.queue = vec![

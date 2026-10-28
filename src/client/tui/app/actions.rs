@@ -95,9 +95,10 @@ impl App {
                 Tab::Playlists => self.enter_input(InputPurpose::NewPlaylist, String::new()),
                 _ => self.add_selected_to_queue(),
             },
-            AddToCurrentPlaylist => self.add_selection_to_current_playlist(),
+            AddToPlaylist => self.add_selection_to_playlist_picker(),
             RenameSelected => match self.tab {
-                // 队列视图：改的是当前队列的名字（匿名队列 = 首次命名）
+                // 队列视图按 c = 把当前队列另存为播放列表（预填出处名：
+                // 想覆盖它就原样回车，想另存就改个名字）
                 Tab::Queue => {
                     let name = self.current_playlist.clone().unwrap_or_default();
                     self.enter_input(InputPurpose::SavePlaylist, name);

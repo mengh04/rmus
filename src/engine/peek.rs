@@ -6,7 +6,7 @@ use crate::proto::{Event, PlayState, RepeatMode};
 
 pub(super) struct PeekSnapshot {
     queue: Queue,
-    queue_name: Option<String>,
+    queue_origin: Option<String>,
     /// 存档时的播放进度（毫秒）。必须在换队列（输出流 reset 清零帧计数）前取
     position_ms: u64,
     /// 恢复后回到的状态：Playing 继续播，Paused 停在原进度
@@ -33,7 +33,7 @@ impl Engine {
             let position_ms = self.position_ms();
             let snapshot = PeekSnapshot {
                 queue: std::mem::take(&mut self.queue),
-                queue_name: self.queue_name.take(),
+                queue_origin: self.queue_origin.take(),
                 position_ms,
                 state: self.state,
                 repeat: self.repeat,
@@ -44,7 +44,7 @@ impl Engine {
         self.kill_decoder();
         self.queue.items = items;
         self.queue.current = None;
-        self.queue_name = None;
+        self.queue_origin = None;
         // 临时队列固定顺序播放，循环/随机语义留给恢复后的原队列
         self.repeat = RepeatMode::Off;
         self.random = false;
@@ -65,7 +65,7 @@ impl Engine {
         let current = snap.queue.current;
         self.kill_decoder();
         self.queue = snap.queue;
-        self.queue_name = snap.queue_name;
+        self.queue_origin = snap.queue_origin;
         self.repeat = snap.repeat;
         self.random = snap.random;
         self.fatal_streak = 0;

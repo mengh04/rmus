@@ -17,11 +17,13 @@ use crate::proto::{Event, PlayState};
 const LIMIT: usize = 100;
 
 /// 一次改动前的队列快照。
+///
+/// 只存队列内容与当前下标：队列的"出处标签"（`queue_origin`）不是队列内容，
+/// 撤销删曲不能把"我从哪张列表来的"一起回滚——那是列表身份，不是曲目
 #[derive(Clone)]
 pub(super) struct Snapshot {
     items: Vec<QueueItem>,
     current: Option<usize>,
-    queue_name: Option<String>,
 }
 
 impl Engine {
@@ -71,7 +73,6 @@ impl Engine {
         Snapshot {
             items: self.queue.items.clone(),
             current: self.queue.current,
-            queue_name: self.queue_name.clone(),
         }
     }
 
@@ -81,7 +82,6 @@ impl Engine {
         let playing_path = self.queue.current_item().map(|i| i.path.clone());
         self.queue.items = snap.items;
         self.queue.current = snap.current;
-        self.queue_name = snap.queue_name;
         self.dirty = true;
         self.emit(Event::QueueChanged);
         let same_track = self

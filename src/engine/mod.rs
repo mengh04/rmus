@@ -11,6 +11,7 @@
 //! - [`playback`]：播放/暂停/切歌/跳转/音量
 //! - [`track`]：起一条解码线程（含插播）
 //! - [`peek`]：试听态存档与恢复
+//! - [`playlist`]：队列 ↔ 播放列表的唯一边界（save / load / append）
 //!
 //! 参考 hummingbird `src/playback/thread.rs`，第一版精简掉：
 //! gapless 双缓冲 / EQ / ReplayGain / AudioBlock 池 / 解码卡死恢复。
@@ -20,6 +21,7 @@ mod handlers;
 mod output;
 mod peek;
 mod playback;
+mod playlist;
 pub mod queue;
 mod resample;
 mod run;
@@ -98,9 +100,10 @@ pub(super) struct DecoderHandle {
 
 pub struct Engine {
     queue: Queue,
-    /// 队列来源标签（来源播放列表的名字）；None = 匿名临时队列（open/add 出来的）。
-    /// 仅用于顶栏显示和 `w` 的默认保存目标——队列怎么改都不回写播放列表
-    queue_name: Option<String>,
+    /// 队列**来源**标签（从哪张播放列表复制来的）；None = 匿名队列。
+    /// 只用于顶栏显示和"是否已偏离原列表"的比较——任何队列改动都不回写
+    /// 播放列表，任何播放列表操作也不靠它推导目标（写入目标必须由请求给出）
+    queue_origin: Option<String>,
     /// 播放列表：持久命名集合。播放 = 复制进队列，保存 = PlaylistSave 显式写回
     playlists: BTreeMap<String, Vec<QueueItem>>,
     repeat: RepeatMode,
@@ -155,7 +158,7 @@ impl Engine {
         }
         Ok(Self {
             queue,
-            queue_name: persisted.queue_name,
+            queue_origin: persisted.queue_name,
             playlists: persisted.playlists,
             repeat: persisted.repeat.unwrap_or_default(),
             random: persisted.random.unwrap_or(false),
@@ -180,7 +183,7 @@ impl Engine {
             volume: Some(self.output.volume()),
             repeat: Some(self.repeat),
             random: Some(self.random),
-            queue_name: self.queue_name.clone(),
+            queue_name: self.queue_origin.clone(),
             current_index: self.queue.current,
             current_queue: self.queue.items.clone(),
             playlists: self.playlists.clone(),
@@ -215,7 +218,8 @@ impl Engine {
             track: self.queue.current.and_then(|i| self.queue.track_info(i)),
             repeat: self.repeat,
             random: self.random,
-            queue_name: self.queue_name.clone(),
+            queue_name: self.queue_origin.clone(),
+            queue_modified: self.queue_modified(),
             peeking: self.peek.is_some(),
         }
     }

@@ -159,7 +159,8 @@ impl Engine {
                 let names = self.playlists.keys().cloned().collect();
                 Ok(Reply::Playlists {
                     names,
-                    current: self.queue_name.clone(),
+                    current: self.queue_origin.clone(),
+                    modified: self.queue_modified(),
                 })
             }
             Request::PlaylistNew { name } => {
@@ -170,27 +171,22 @@ impl Engine {
                 self.dirty = true;
                 Ok(Reply::Ok)
             }
-            Request::PlaylistSave { name } => {
-                self.playlists.insert(name.clone(), self.queue.items.clone());
-                self.queue_name = Some(name);
+            Request::PlaylistSave { name, overwrite } => {
+                super::playlist::save(&mut self.playlists, &name, &self.queue.items, overwrite)?;
+                // 保存 = 队列成为该列表的一份新副本：出处跟着指向它
+                self.queue_origin = Some(name);
                 self.dirty = true;
                 Ok(Reply::Ok)
             }
             Request::PlaylistPlay { name } => {
-                let Some(items) = self.playlists.get(&name) else {
-                    return Err(format!("播放列表 {name} 不存在"));
-                };
-                if items.is_empty() {
-                    return Err(format!("播放列表 {name} 是空的"));
-                }
-                let items = items.clone();
+                let items = super::playlist::load(&self.playlists, &name)?;
                 // 显式换队列 = 放弃试听恢复点
                 self.peek = None;
                 self.kill_decoder();
                 self.queue.items = items;
                 self.queue.current = None;
-                // 复制进队列，之后各播各的：queue_name 只是来源标签
-                self.queue_name = Some(name);
+                // 复制进队列，之后各播各的：queue_origin 只是来源标签
+                self.queue_origin = Some(name);
                 self.dirty = true;
                 self.emit(Event::QueueChanged);
                 self.start_track(0, 0, true);
@@ -199,6 +195,10 @@ impl Engine {
             Request::PlaylistRemove { name } => {
                 if self.playlists.remove(&name).is_none() {
                     return Err(format!("播放列表 {name} 不存在"));
+                }
+                // 删的正是队列的出处：标签失效，回退为匿名队列
+                if self.queue_origin.as_deref() == Some(name.as_str()) {
+                    self.queue_origin = None;
                 }
                 self.dirty = true;
                 Ok(Reply::Ok)
@@ -215,9 +215,9 @@ impl Engine {
                 }
                 let items = self.playlists.remove(&from).unwrap_or_default();
                 self.playlists.insert(to.clone(), items);
-                // 正在播的队列来自这张：来源标签跟随
-                if self.queue_name.as_deref() == Some(from.as_str()) {
-                    self.queue_name = Some(to);
+                // 正在播的队列来自这张：出处标签跟随（仅标签，内容不动）
+                if self.queue_origin.as_deref() == Some(from.as_str()) {
+                    self.queue_origin = Some(to);
                 }
                 self.dirty = true;
                 Ok(Reply::Ok)

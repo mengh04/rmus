@@ -80,14 +80,21 @@ fn left_line(app: &App, theme: &Theme, width: u16) -> Line<'static> {
         used += w + 2;
     }
 
-    // 队列名：匿名临时队列不显示，省得每帧都在喊“临时”
+    // 队列的出处列表：匿名队列不显示，省得每帧都在喊“临时”。
+    // 已偏离原列表（队列被增删排序）时名字后面加 `*`——提醒这已经是
+    // 队列自己的内容，列表还是原样
     if let Some(name) = app
         .status
         .as_ref()
         .and_then(|s| s.queue_name.as_deref())
         .filter(|n| !n.is_empty())
     {
-        let tail = format!("· {name}");
+        let modified = app.queue_modified();
+        let tail = if modified {
+            format!("· {name}*")
+        } else {
+            format!("· {name}")
+        };
         let w = tail.width() as u16;
         if used + w < width {
             spans.push(Span::styled(tail, theme.style_muted()));

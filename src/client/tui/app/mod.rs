@@ -135,6 +135,15 @@ pub struct VisualSel {
     pub anchor: usize,
 }
 impl App {
+    /// 队列是否已偏离它的来源列表（顶栏 `*`、`w` 的提示用）。
+    /// TUI 不缓存列表内容，直接读 daemon 报告的这个标志
+    pub(crate) fn queue_modified(&self) -> bool {
+        self.status
+            .as_ref()
+            .map(|s| s.queue_modified)
+            .unwrap_or(false)
+    }
+
     pub fn new(daemon: Daemon) -> Self {
 
         Self {
@@ -257,13 +266,13 @@ impl App {
                             self.visual_swap_ends();
                             true
                         }
-                        // 音乐库选段：a 加入指定播放列表（候选列表）、A 加入当前播放列表
+                        // 音乐库选段：a / A 都是"加入指定播放列表"（弹候选列表）
                         (KM::NONE, KeyCode::Char('a')) if self.tab == Tab::Library => {
                             self.add_selection_to_playlist_picker();
                             true
                         }
                         (KM::SHIFT, KeyCode::Char('A')) if self.tab == Tab::Library => {
-                            self.add_selection_to_current_playlist();
+                            self.add_selection_to_playlist_picker();
                             true
                         }
                         (KM::NONE, KeyCode::Char('v')) | (KM::SHIFT, KeyCode::Char('V')) => {

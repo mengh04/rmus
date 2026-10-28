@@ -30,7 +30,7 @@ impl Engine {
                     self.queue.items.extend(items);
                     self.dirty = true;
                     self.emit(Event::QueueChanged);
-                    let _ = reply.send(Ok(Reply::Added { added }));
+                    let _ = reply.send(Ok(Reply::Added { added, skipped: 0 }));
                 }
                 Ok(ToEngine::OpenScanned { items, reply, .. }) => {
                     if items.is_empty() {
@@ -42,7 +42,7 @@ impl Engine {
                     self.kill_decoder();
                     self.queue.items = items;
                     self.queue.current = None;
-                    self.queue_name = None;
+                    self.queue_origin = None;
                     self.dirty = true;
                     self.emit(Event::QueueChanged);
                     self.start_track(0, 0, true);
@@ -64,10 +64,10 @@ impl Engine {
                     name, items, reply, ..
                 }) => {
                     // 纯播放列表编辑：动的是"文件"，不碰正在播放的队列
-                    let added = items.len();
-                    self.playlists.entry(name).or_default().extend(items);
+                    let (added, skipped) =
+                        super::playlist::append(&mut self.playlists, &name, items);
                     self.dirty = true;
-                    let _ = reply.send(Ok(Reply::Added { added }));
+                    let _ = reply.send(Ok(Reply::Added { added, skipped }));
                 }
                 Ok(ToEngine::TrackEof { generation }) => {
                     if self

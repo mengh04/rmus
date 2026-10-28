@@ -88,7 +88,7 @@ fn mode_hint(app: &App) -> Option<&'static str> {
     }
     if app.visual.is_some() {
         return Some(if app.tab == Tab::Library {
-            "-- VISUAL -- 移动扩选 · a 加入播放列表 · A 加入当前列表 · Esc 退出"
+            "-- VISUAL -- 移动扩选 · a/A 加入播放列表（选目标）· Esc 退出"
         } else {
             "-- VISUAL -- 已选中当前行 · 移动扩选 · d 剪切 / y 复制"
         });

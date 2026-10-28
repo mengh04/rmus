@@ -54,8 +54,12 @@ pub struct StatusInfo {
     pub track: Option<TrackInfo>,
     pub repeat: RepeatMode,
     pub random: bool,
-    /// 当前队列的名字；None = 匿名临时队列
+    /// 当前队列的**来源**播放列表名；None = 匿名队列
     pub queue_name: Option<String>,
+    /// 队列内容已偏离它的来源列表（顶栏打 `*`）。任何队列改动都不会回写列表，
+    /// 这个标志只负责提示"你听的已经不是那张列表了"
+    #[serde(default)]
+    pub queue_modified: bool,
     /// 试听态：队列是临时的，结束（播完/back）后恢复原队列与进度
     pub peeking: bool,
 }
@@ -133,8 +137,13 @@ pub enum Request {    /// 查询状态快照
     PlaylistsList,
     /// 创建空播放列表
     PlaylistNew { name: String },
-    /// 当前队列保存为播放列表（覆盖同名）
-    PlaylistSave { name: String },
+    /// 当前队列保存为播放列表。`overwrite = false` 时同名列表已存在就报错，
+    /// 避免"队列改了想存一下"静默冲掉整张列表
+    PlaylistSave {
+        name: String,
+        #[serde(default)]
+        overwrite: bool,
+    },
     /// 播放列表复制进队列并从头播放（之后互不影响）
     PlaylistPlay { name: String },
     /// 添加文件/目录到播放列表（不存在则创建；不影响正在播放的队列）
@@ -191,10 +200,19 @@ pub enum Request {    /// 查询状态快照
 pub enum Reply {
     Status(Box<StatusInfo>),
     Queue { tracks: Vec<TrackInfo> },
-    Added { added: usize },
+    /// 加入成功：`added` 为实际新增，`skipped` 为因重复被略过的数量
+    Added {
+        added: usize,
+        #[serde(default)]
+        skipped: usize,
+    },
     Playlists {
         names: Vec<String>,
+        /// 当前队列的来源列表（`None` = 匿名队列）
         current: Option<String>,
+        /// 队列内容已偏离 `current` 那张列表
+        #[serde(default)]
+        modified: bool,
     },
     /// 库搜索候选（按相关度降序）
     Matches { tracks: Vec<TrackInfo> },

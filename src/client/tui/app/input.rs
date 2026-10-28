@@ -63,21 +63,25 @@ impl App {
                     self.notify("播放列表名不能为空", true);
                     return;
                 }
-                // 当前队列已有名字且改了名：走重命名，旧名字条目不残留
-                if let Some(prev) = self.current_playlist.clone()
-                    && prev != name
-                {
-                    self.simple(Request::PlaylistRename {
-                        from: prev.clone(),
-                        to: name.clone(),
-                    });
-                    self.need_playlists = true;
-                    self.notify(format!("“{prev}” 已重命名为 “{name}”"), false);
-                    return;
+                // 只有"存回自己的出处列表"才允许覆盖；其余一律当另存为，
+                // 同名已存在就拒绝——不再拿改名当保存，也不静默冲掉别的列表
+                let overwrite = self.current_playlist.as_deref() == Some(name.as_str());
+                match self.daemon.request(Request::PlaylistSave {
+                    name: name.clone(),
+                    overwrite,
+                }) {
+                    Ok(_) => self.notify(
+                        if overwrite {
+                            format!("已把当前队列覆盖回 “{name}”")
+                        } else {
+                            format!("当前队列已另存为 “{name}”")
+                        },
+                        false,
+                    ),
+                    Err(e) => self.notify(format!("{e}"), true),
                 }
-                self.simple(Request::PlaylistSave { name: name.clone() });
                 self.need_playlists = true;
-                self.notify(format!("当前队列已保存为 “{name}”"), false);
+                self.need_status = true;
             }
             InputPurpose::RenamePlaylist(from) => {
                 let to = text.trim().to_string();

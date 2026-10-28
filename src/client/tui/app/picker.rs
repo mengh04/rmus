@@ -36,40 +36,23 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// A（音乐库）：把选中曲加入**当前播放列表**。当前队列是匿名的则提示
-    /// 先按 w 命名保存。
-    pub(super) fn add_selection_to_current_playlist(&mut self) {
-        let paths = self.library_selected_paths();
-        if paths.is_empty() {
-            return;
-        }
-        let Some(name) = self
-            .current_playlist
-            .clone()
-            .filter(|n| !n.is_empty())
-        else {
-            self.notify("当前队列还是匿名的：先按 w 保存成播放列表", true);
-            return;
-        };
-        let n = paths.len();
-        self.simple(Request::PlaylistAdd {
-            name: name.clone(),
-            paths,
-        });
-        self.need_playlists = true;
-        self.exit_visual();
-        self.notify(format!("已把 {n} 首加入 “{name}”"), false);
-    }
-
-    /// a（音乐库 visual）：把选中曲加入**指定播放列表**——弹候选列表。
+    /// A（音乐库）：把选中曲加入**指定的**播放列表——弹候选列表。
+    /// 往哪张列表加必须看得见：不再默认写进"当前队列的出处列表"
     pub(super) fn add_selection_to_playlist_picker(&mut self) {
         let paths = self.library_selected_paths();
         if paths.is_empty() {
             return;
         }
         let summary = self.selection_summary();
-        let items = self
-            .playlists
+        // 出处列表排第一：最常见的操作仍是"加回我正在听的那张"
+        let mut names = self.playlists.clone();
+        if let Some(cur) = self.current_playlist.clone()
+            && let Some(pos) = names.iter().position(|n| *n == cur)
+        {
+            let name = names.remove(pos);
+            names.insert(0, name);
+        }
+        let items = names
             .iter()
             .map(|name| CandidateItem {
                 label: name.clone(),
@@ -186,18 +169,28 @@ impl App {
         }
         let n = paths.len();
         let created = !self.playlists.contains(&target);
-        self.simple(Request::PlaylistAdd {
-            name: target.clone(),
-            paths,
-        });
+        let skipped = self
+            .daemon
+            .request(Request::PlaylistAdd {
+                name: target.clone(),
+                paths,
+            })
+            .ok()
+            .and_then(|v| v.get("skipped").and_then(|s| s.as_u64()))
+            .unwrap_or(0) as usize;
+        // 只写播放列表，队列分毫不动 —— 这正是解耦后 A 的语义
         self.need_playlists = true;
-        self.need_queue = true;
         self.close_picker();
+        let dup = if skipped > 0 {
+            format!("，{skipped} 首已在列表里")
+        } else {
+            String::new()
+        };
         self.notify(
             if created {
-                format!("已新建播放列表 “{target}” 并加入 {n} 首")
+                format!("已新建播放列表 “{target}” 并加入 {} 首{dup}（当前队列未变）", n - skipped)
             } else {
-                format!("已把 {n} 首加入 “{target}”")
+                format!("已把 {} 首加入 “{target}”{dup}（当前队列未变）", n - skipped)
             },
             false,
         );
