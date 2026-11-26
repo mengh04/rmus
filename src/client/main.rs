@@ -76,6 +76,9 @@ enum Command {
     Random { mode: Option<String> },
     /// 自动推荐（播着播着自动插歌）：无参数切换；或 on/off
     Auto { mode: Option<String> },
+    /// 种子电台（Apple Music 式）：无参数 = 以当前曲建台；歌名 = 搜库建台；off/stop = 退出电台
+    #[command(alias = "station")]
+    Radio { query: Vec<String> },
     /// 播放列表管理
     #[command(subcommand)]
     Pl(Pl),

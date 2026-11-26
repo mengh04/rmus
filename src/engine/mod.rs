@@ -29,7 +29,7 @@ mod store;
 mod track;
 mod undo;
 
-use crate::proto::{Event, PlayState, RepeatMode, Reply, Request, StatusInfo};
+use crate::proto::{Event, PlayState, RadioInfo, RepeatMode, Reply, Request, StatusInfo};
 use anyhow::Result;
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
@@ -47,17 +47,28 @@ use undo::Snapshot;
 /// position 事件推送节流间隔
 pub(super) const POSITION_EVENT_INTERVAL: Duration = Duration::from_millis(250);
 
+/// 引擎内的种子电台状态。
+#[derive(Debug, Clone)]
+pub(super) struct RadioState {
+    pub(super) id: u64,
+    pub(super) seed: QueueItem,
+}
+
 /// 自动推荐器一次性拉取的引擎快照（避免多次 RPC 竞态）。
 #[derive(Debug, Clone)]
 pub struct RecommendContext {
     pub state: PlayState,
     pub current: Option<usize>,
+    pub position_ms: u64,
+    pub duration_ms: u64,
     pub queue: Vec<QueueItem>,
     pub playlists: BTreeMap<String, Vec<QueueItem>>,
     pub repeat: RepeatMode,
     pub random: bool,
     pub peeking: bool,
     pub auto_recommend: bool,
+    /// 当前激活的种子电台：`(station_id, 原始种子曲目)`
+    pub radio: Option<(u64, QueueItem)>,
 }
 
 /// 引擎收到的所有消息（命令 + 解码线程回报）。
@@ -79,10 +90,23 @@ pub enum ToEngine {
         items: Vec<QueueItem>,
         reply: oneshot::Sender<Result<Reply, String>>,
     },
-    /// 自动推荐后台静默插入（标 `recommended = true`，不污染撤销栈，按路径去重）
+    /// 自动推荐/电台后台静默插入（标 `recommended = true`，不污染撤销栈，按路径去重）。
+    /// `expected_radio_id` 为 `Some(id)` 时，仅当当前仍处于同 id 电台才落队，防旧电台串味。
     InsertAuto {
         items: Vec<QueueItem>,
         after_current: bool,
+        expected_radio_id: Option<u64>,
+    },
+    /// 以指定曲目作为种子创建电台：清空队列、以种子歌为第 1 首开播并开启电台模式
+    StartRadio {
+        id: u64,
+        seed: QueueItem,
+        reply: oneshot::Sender<Result<Reply, String>>,
+    },
+    /// 以当前队列正在播放/选中的曲目作为种子创建电台
+    StartRadioCurrent {
+        id: u64,
+        reply: oneshot::Sender<Result<Reply, String>>,
     },
     /// 自动推荐器查询当前引擎快照
     RecommendSnapshot {
@@ -143,6 +167,10 @@ pub struct Engine {
     repeat: RepeatMode,
     random: bool,
     auto_recommend: bool,
+    /// 当前激活的种子电台（None = 普通队列）
+    radio: Option<RadioState>,
+    /// 电台会话单调递增 id（区分新旧电台，防止旧电台后台下载串进新电台）
+    radio_gen: u64,
     state: PlayState,
     output: Output,
     decoder: Option<DecoderHandle>,
@@ -193,6 +221,8 @@ impl Engine {
         if let Some(volume) = persisted.volume {
             output.set_volume(volume);
         }
+        let radio = persisted.radio.map(|seed| RadioState { id: 1, seed });
+        let radio_gen = if radio.is_some() { 1 } else { 0 };
         Ok(Self {
             queue,
             queue_origin: persisted.queue_name,
@@ -200,6 +230,8 @@ impl Engine {
             repeat: persisted.repeat.unwrap_or_default(),
             random: persisted.random.unwrap_or(false),
             auto_recommend: persisted.auto_recommend.unwrap_or(true),
+            radio,
+            radio_gen,
             state: PlayState::Stopped,
             output,
             decoder: None,
@@ -223,6 +255,7 @@ impl Engine {
             repeat: Some(self.repeat),
             random: Some(self.random),
             auto_recommend: Some(self.auto_recommend),
+            radio: self.radio.as_ref().map(|r| r.seed.clone()),
             queue_name: self.queue_origin.clone(),
             current_index: self.queue.current,
             current_queue: self.queue.items.clone(),
@@ -259,6 +292,11 @@ impl Engine {
             repeat: self.repeat,
             random: self.random,
             auto_recommend: self.auto_recommend,
+            radio: self.radio.as_ref().map(|r| RadioInfo {
+                path: r.seed.path.clone(),
+                title: r.seed.title.clone(),
+                artist: r.seed.artist.clone(),
+            }),
             queue_name: self.queue_origin.clone(),
             queue_modified: self.queue_modified(),
             peeking: self.peek.is_some(),

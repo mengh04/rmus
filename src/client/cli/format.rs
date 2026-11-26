@@ -37,8 +37,18 @@ pub(crate) fn print_status(status: &StatusInfo) {
         RepeatMode::One => "单曲循环",
     };
     let random = if status.random { "随机" } else { "顺序" };
-    let auto_rec = if status.auto_recommend { "/推荐开" } else { "" };
-    let queue = status.queue_name.clone().unwrap_or_else(|| "临时".into());
+    let auto_rec = if status.radio.is_some() {
+        "/电台"
+    } else if status.auto_recommend {
+        "/推荐开"
+    } else {
+        ""
+    };
+    let queue = if let Some(radio) = &status.radio {
+        format!("◉电台:{}", radio.title)
+    } else {
+        status.queue_name.clone().unwrap_or_else(|| "临时".into())
+    };
     let peek = if status.peeking {
         "  ♪试听中(rmus back 恢复)"
     } else {

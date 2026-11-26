@@ -68,10 +68,18 @@ impl Engine {
                 }
                 self.kill_decoder();
                 self.queue.clear();
+                let had_radio = self.radio.take().is_some();
                 self.state = PlayState::Stopped;
                 self.seek_base_ms = 0;
                 self.dirty = true;
                 self.emit(Event::QueueChanged);
+                if had_radio {
+                    self.emit(Event::ModeChanged {
+                        repeat: self.repeat,
+                        random: self.random,
+                        auto_recommend: self.auto_recommend,
+                    });
+                }
                 self.emit(Event::StateChanged {
                     state: PlayState::Stopped,
                 });
@@ -180,8 +188,9 @@ impl Engine {
             }
             Request::PlaylistPlay { name } => {
                 let items = super::playlist::load(&self.playlists, &name)?;
-                // 显式换队列 = 放弃试听恢复点
+                // 显式换队列 = 放弃试听恢复点与电台态
                 self.peek = None;
+                self.radio = None;
                 self.kill_decoder();
                 self.queue.items = items;
                 self.queue.current = None;
@@ -256,6 +265,17 @@ impl Engine {
                 });
                 Ok(Reply::Status(Box::new(self.status())))
             }
+            Request::RadioStop => {
+                if self.radio.take().is_some() {
+                    self.dirty = true;
+                    self.emit(Event::ModeChanged {
+                        repeat: self.repeat,
+                        random: self.random,
+                        auto_recommend: self.auto_recommend,
+                    });
+                }
+                Ok(Reply::Status(Box::new(self.status())))
+            }
             Request::Undo => match self.undo() {
                 Ok(()) => Ok(Reply::Status(Box::new(self.status()))),
                 Err(e) => Err(e),
@@ -286,11 +306,12 @@ impl Engine {
             | Request::PluginData { .. } => {
                 Err("内部错误：插件请求未在 daemon 层处理".into())
             }
-            // Find/PlayMatch/LibList/LibRescan 由 daemon 层处理（查库/扫描），不应到达这里
-            Request::Find { .. } | Request::PlayMatch { .. } | Request::LibList
-            | Request::LibRescan => {
-                Err("内部错误：库请求未在 daemon 层处理".into())
-            }
+            // Find/PlayMatch/LibList/LibRescan/RadioStart 由 daemon 层处理（查库/扫描），不应到达这里
+            Request::Find { .. }
+            | Request::PlayMatch { .. }
+            | Request::RadioStart { .. }
+            | Request::LibList
+            | Request::LibRescan => Err("内部错误：库请求未在 daemon 层处理".into()),
         }
     }
 }

@@ -47,6 +47,14 @@ pub struct TrackInfo {
     pub recommended: bool,
 }
 
+/// 种子电台状态（Apple Music 式：以一首歌为种子，后续每首均由电台持续推送）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RadioInfo {
+    pub path: PathBuf,
+    pub title: String,
+    pub artist: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StatusInfo {
     pub state: PlayState,
@@ -64,6 +72,9 @@ pub struct StatusInfo {
     /// 自动推荐开关：播着播着自动插歌（队尾续播 + 播中穿插）
     #[serde(default)]
     pub auto_recommend: bool,
+    /// 种子电台态：Some = 正在运行以该曲为种子的电台
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radio: Option<RadioInfo>,
     /// 当前队列的**来源**播放列表名；None = 匿名队列
     pub queue_name: Option<String>,
     /// 队列内容已偏离它的来源列表（顶栏打 `*`）。任何队列改动都不会回写列表，
@@ -173,6 +184,16 @@ pub enum Request {    /// 查询状态快照
     SetRandom { on: Option<bool> },
     /// 自动推荐开关：None = 切换
     SetAutoRecommend { on: Option<bool> },
+    /// 创建种子电台（Apple Music 式）：以种子歌作为第一首立即开播，后续每首由电台自动推送。
+    /// `path` 与 `query` 均省略时以当前正在播放的曲目作为种子。由 daemon 层解析种子后转交引擎。
+    RadioStart {
+        #[serde(default)]
+        path: Option<PathBuf>,
+        #[serde(default)]
+        query: Option<String>,
+    },
+    /// 退出电台模式（保留当前队列，不再按电台规则持续推送）
+    RadioStop,
     /// 库模糊搜索：按相关度返回候选（daemon 层查索引）
     Find { query: String },
     /// 库模糊播放：最佳匹配插到当前曲后立即播（空队列则直接播）。
@@ -406,6 +427,14 @@ mod tests {
             method(&Request::PluginCancel { plugin: "dl".into(), call: 3 }),
             "plugin_cancel"
         );
+        assert_eq!(
+            method(&Request::RadioStart {
+                path: None,
+                query: Some("晴天".into()),
+            }),
+            "radio_start"
+        );
+        assert_eq!(method(&Request::RadioStop), "radio_stop");
     }
 
     /// Reply::Plugin 是透明透传：序列化后就是插件 JSON 本身。

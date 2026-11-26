@@ -16,6 +16,10 @@ fn 解析_基础() {
     assert_eq!(parse("repeat all"), Ok(Cmd::Repeat(Some(RepeatMode::All))));
     assert_eq!(parse("repeat"), Ok(Cmd::Repeat(None)));
     assert_eq!(parse("rand off"), Ok(Cmd::Random(Some(false))));
+    assert_eq!(parse("radio"), Ok(Cmd::RadioStart(None)));
+    assert_eq!(parse("radio 晴天 周杰伦"), Ok(Cmd::RadioStart(Some("晴天 周杰伦".into()))));
+    assert_eq!(parse("station off"), Ok(Cmd::RadioStop));
+    assert_eq!(parse("radio 退出"), Ok(Cmd::RadioStop));
     assert_eq!(parse("rescan"), Ok(Cmd::Rescan));
     assert_eq!(parse("h"), Ok(Cmd::Help));
 }

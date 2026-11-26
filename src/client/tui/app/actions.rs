@@ -137,6 +137,8 @@ impl App {
             MarkClear => self.clear_marks(),
             ToggleRandom => self.simple(Request::SetRandom { on: None }),
             ToggleAutoRecommend => self.simple(Request::SetAutoRecommend { on: None }),
+            StartRadio => self.start_radio_selected(),
+            StopRadio => self.stop_radio(),
             VolumeUp => self.simple(Request::AdjustVolume { delta: 0.05 }),
             VolumeDown => self.simple(Request::AdjustVolume { delta: -0.05 }),
             Search => match &self.tab {
@@ -217,6 +219,51 @@ impl App {
             path: track.path,
             label,
         };
+    }
+
+    /// 以选中曲（队列/音乐库）或当前播放曲创建种子电台。
+    pub(super) fn start_radio_selected(&mut self) {
+        let track = match self.tab {
+            Tab::Queue => self.queue.get(self.queue_selected).cloned(),
+            Tab::Library => self.library.get(self.library_selected).cloned(),
+            _ => self.status.as_ref().and_then(|s| s.track.clone()),
+        };
+        let Some(track) = track else {
+            self.notify("没有可作为种子的曲目", true);
+            return;
+        };
+        match self.daemon.request(Request::RadioStart {
+            path: Some(track.path),
+            query: None,
+        }) {
+            Ok(_) => {
+                let label = if track.artist.is_empty() {
+                    track.title
+                } else {
+                    format!("{} - {}", track.title, track.artist)
+                };
+                self.notify(format!("◉ 电台已创建：{label}"), false);
+                self.queue_selected = 0;
+                self.need_queue = true;
+                self.need_status = true;
+            }
+            Err(e) => self.notify(format!("{e}"), true),
+        }
+    }
+
+    /// 退出电台模式（保留当前队列）。
+    pub(super) fn stop_radio(&mut self) {
+        if self.status.as_ref().is_none_or(|s| s.radio.is_none()) {
+            self.notify("当前不在电台模式", false);
+            return;
+        }
+        match self.daemon.request(Request::RadioStop) {
+            Ok(_) => {
+                self.notify("已退出电台模式", false);
+                self.need_status = true;
+            }
+            Err(e) => self.notify(format!("{e}"), true),
+        }
     }
 
     /// 全量重建库索引，完成后提示曲目数。

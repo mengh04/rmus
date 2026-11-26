@@ -33,6 +33,7 @@ fn demo_app() -> App {
         repeat: RepeatMode::All,
         random: false,
         auto_recommend: false,
+        radio: None,
         queue_name: Some("深夜循环".into()),
         queue_modified: true,
         peeking: false,
@@ -156,6 +157,29 @@ fn 播放错误显示在状态行() {
     assert!(msg.error, "错误消息要按错误样式显示");
     assert!(msg.text.contains("不支持的编码"), "消息内容: {}", msg.text);
     assert!(msg.alive(), "错误消息应立即可见");
+}
+
+/// 电台模式顶栏应显示种子电台标签与「电台 开」指示。
+#[test]
+fn 电台模式顶栏渲染() {
+    let mut app = demo_app();
+    if let Some(status) = app.status.as_mut() {
+        status.queue_name = None;
+        status.radio = Some(crate::proto::RadioInfo {
+            path: "/tmp/红豆.flac".into(),
+            title: "红豆".into(),
+            artist: "王菲".into(),
+        });
+    }
+    let lines = render(&mut app, 120, 30);
+    assert!(
+        lines.iter().any(|l| l.contains("◉ 红豆")),
+        "顶栏应展示电台种子"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("电台 开")),
+        "顶栏右侧应显示电台开"
+    );
 }
 
 /// 打印一份快照（`cargo test -- --nocapture` 时人工看）。

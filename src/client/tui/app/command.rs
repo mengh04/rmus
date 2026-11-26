@@ -25,6 +25,31 @@ impl App {
             Cmd::Repeat(mode) => self.simple(Request::SetRepeat { mode }),
             Cmd::Random(on) => self.simple(Request::SetRandom { on }),
             Cmd::AutoRecommend(on) => self.simple(Request::SetAutoRecommend { on }),
+            Cmd::RadioStart(None) => self.start_radio_selected(),
+            Cmd::RadioStart(Some(query)) => {
+                match self.daemon.request(Request::RadioStart {
+                    path: None,
+                    query: Some(query),
+                }) {
+                    Ok(value) => {
+                        let status: Option<crate::proto::StatusInfo> =
+                            serde_json::from_value(value).ok();
+                        if let Some(radio) = status.and_then(|s| s.radio) {
+                            self.notify(
+                                format!("◉ 电台已创建：{} - {}", radio.title, radio.artist),
+                                false,
+                            );
+                        } else {
+                            self.notify("◉ 电台已创建", false);
+                        }
+                        self.queue_selected = 0;
+                        self.need_queue = true;
+                        self.need_status = true;
+                    }
+                    Err(e) => self.notify(format!("{e}"), true),
+                }
+            }
+            Cmd::RadioStop => self.stop_radio(),
             Cmd::Add(path) => self.load_paths(|paths| Request::Add { paths }, path, "已加入队列"),
             Cmd::Open(path) => {
                 self.load_paths(|paths| Request::Open { paths }, path, "已替换队列并播放")

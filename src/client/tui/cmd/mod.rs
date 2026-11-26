@@ -56,6 +56,10 @@ pub const SPECS: &[Spec] = &[
         desc: "自动推荐 on | off（缺省切换）",
     },
     Spec {
+        names: &["radio", "station"],
+        desc: "创建种子电台 [歌名] | off 退出",
+    },
+    Spec {
         names: &["add"],
         desc: "加入队列（整行为一个路径）",
     },

@@ -152,6 +152,100 @@ pub(crate) async fn dispatch(
         return;
     }
 
+    // 创建种子电台：按 path / query 解析种子曲，均省略则用当前正在播放的曲目
+    if let Request::RadioStart { path, query } = msg.request {
+        if let Some(path) = path {
+            // 优先查库索引（秒级、标签完整），未命中再扫描文件
+            let from_lib = {
+                let lib = library.read().unwrap();
+                lib.iter()
+                    .find(|e| e.item.path == path)
+                    .map(|e| e.item.clone())
+            };
+            let cmd_tx = cmd_tx.clone();
+            let out_tx = out_tx.clone();
+            tokio::spawn(async move {
+                let item = match from_lib {
+                    Some(it) => Some(it),
+                    None => tokio::task::spawn_blocking(move || {
+                        scan::collect(&[path]).into_iter().next()
+                    })
+                    .await
+                    .ok()
+                    .flatten(),
+                };
+                match item {
+                    Some(seed) => {
+                        let (reply_tx, reply_rx) = oneshot::channel();
+                        if cmd_tx
+                            .send(ToEngine::StartRadio {
+                                id,
+                                seed,
+                                reply: reply_tx,
+                            })
+                            .is_err()
+                        {
+                            return;
+                        }
+                        send_reply(id, reply_rx.await, &out_tx);
+                    }
+                    None => {
+                        let json = serde_json::to_string(&error_reply(
+                            id,
+                            "找不到可用的种子音频文件".into(),
+                        ))
+                        .unwrap_or_default();
+                        let _ = out_tx.send(json);
+                    }
+                }
+            });
+            return;
+        }
+        if let Some(query) = query.map(|q| q.trim().to_string()).filter(|q| !q.is_empty()) {
+            let best = {
+                let lib = library.read().unwrap();
+                library::matches(&lib, &query).into_iter().next().cloned()
+            };
+            match best {
+                Some(seed) => {
+                    let (reply_tx, reply_rx) = oneshot::channel();
+                    if cmd_tx
+                        .send(ToEngine::StartRadio {
+                            id,
+                            seed,
+                            reply: reply_tx,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                    send_reply(id, reply_rx.await, out_tx);
+                }
+                None => {
+                    let json = serde_json::to_string(&error_reply(
+                        id,
+                        format!("库中没有匹配 “{query}” 的曲子"),
+                    ))
+                    .unwrap_or_default();
+                    let _ = out_tx.send(json);
+                }
+            }
+            return;
+        }
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if cmd_tx
+            .send(ToEngine::StartRadioCurrent {
+                id,
+                reply: reply_tx,
+            })
+            .is_err()
+        {
+            return;
+        }
+        send_reply(id, reply_rx.await, out_tx);
+        return;
+    }
+
     // 库模糊播放：最佳匹配转引擎插播
     if let Request::PlayMatch { query } = msg.request {
         let best = {

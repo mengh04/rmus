@@ -5,6 +5,7 @@
 use super::super::app::{App, Tab};
 use super::PAGE_MARGIN;
 use super::theme::Theme;
+use super::widgets::fit;
 use crate::proto::{PlayState, StatusInfo};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
@@ -80,10 +81,14 @@ fn left_line(app: &App, theme: &Theme, width: u16) -> Line<'static> {
         used += w + 2;
     }
 
-    // 队列的出处列表：匿名队列不显示，省得每帧都在喊“临时”。
-    // 已偏离原列表（队列被增删排序）时名字后面加 `*`——提醒这已经是
-    // 队列自己的内容，列表还是原样
-    if let Some(name) = app
+    // 队列身份：种子电台优先于来源播放列表显示；匿名队列不显示。
+    if let Some(radio) = app.status.as_ref().and_then(|s| s.radio.as_ref()) {
+        let tail = format!("· ◉ {}", radio.title);
+        let avail = width.saturating_sub(used);
+        if avail >= 6 {
+            spans.push(Span::styled(fit(&tail, avail), theme.style_accent()));
+        }
+    } else if let Some(name) = app
         .status
         .as_ref()
         .and_then(|s| s.queue_name.as_deref())
@@ -131,15 +136,20 @@ fn right_line(app: &App, theme: &Theme, width: u16) -> Line<'static> {
         ));
         spans.push(Span::raw("   "));
         if width >= 82 {
-            spans.push(Span::styled("推荐 ", theme.style_faint()));
-            spans.push(Span::styled(
-                if status.auto_recommend { "开" } else { "关" }.to_owned(),
-                if status.auto_recommend {
-                    theme.style_accent()
-                } else {
-                    theme.style_text()
-                },
-            ));
+            if status.radio.is_some() {
+                spans.push(Span::styled("电台 ", theme.style_faint()));
+                spans.push(Span::styled("开", theme.style_accent()));
+            } else {
+                spans.push(Span::styled("推荐 ", theme.style_faint()));
+                spans.push(Span::styled(
+                    if status.auto_recommend { "开" } else { "关" }.to_owned(),
+                    if status.auto_recommend {
+                        theme.style_accent()
+                    } else {
+                        theme.style_text()
+                    },
+                ));
+            }
             spans.push(Span::raw("   "));
         }
     }

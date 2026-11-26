@@ -115,6 +115,7 @@ fn keys_for(tab: &Tab, online: bool) -> &'static [(&'static str, &'static str)] 
         Tab::Queue => &[
             ("j/k", "移动"),
             ("Enter", "播放"),
+            ("t", "电台"),
             ("J/K", "调序"),
             ("/", "搜索"),
             (":", "命令"),
@@ -124,6 +125,7 @@ fn keys_for(tab: &Tab, online: bool) -> &'static [(&'static str, &'static str)] 
         Tab::Library => &[
             ("j/k", "移动"),
             ("Enter", "插播"),
+            ("t", "电台"),
             ("a", "入队"),
             ("A", "加入当前列表"),
             ("v", "多选"),

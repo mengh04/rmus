@@ -1,12 +1,13 @@
 //! 试听态：进入时存档当前播放状态，结束/播完时原样恢复。
 
-use super::Engine;
+use super::{Engine, RadioState};
 use super::queue::{Queue, QueueItem};
 use crate::proto::{Event, PlayState, RepeatMode};
 
 pub(super) struct PeekSnapshot {
     queue: Queue,
     queue_origin: Option<String>,
+    radio: Option<RadioState>,
     /// 存档时的播放进度（毫秒）。必须在换队列（输出流 reset 清零帧计数）前取
     position_ms: u64,
     /// 恢复后回到的状态：Playing 继续播，Paused 停在原进度
@@ -34,6 +35,7 @@ impl Engine {
             let snapshot = PeekSnapshot {
                 queue: std::mem::take(&mut self.queue),
                 queue_origin: self.queue_origin.take(),
+                radio: self.radio.take(),
                 position_ms,
                 state: self.state,
                 repeat: self.repeat,
@@ -45,6 +47,7 @@ impl Engine {
         self.queue.items = items;
         self.queue.current = None;
         self.queue_origin = None;
+        self.radio = None;
         // 临时队列固定顺序播放，循环/随机语义留给恢复后的原队列
         self.repeat = RepeatMode::Off;
         self.random = false;
@@ -67,6 +70,7 @@ impl Engine {
         self.kill_decoder();
         self.queue = snap.queue;
         self.queue_origin = snap.queue_origin;
+        self.radio = snap.radio;
         self.repeat = snap.repeat;
         self.random = snap.random;
         self.fatal_streak = 0;

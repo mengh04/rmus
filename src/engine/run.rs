@@ -49,9 +49,16 @@ impl Engine {
                 Ok(ToEngine::InsertAuto {
                     items,
                     after_current,
+                    expected_radio_id,
                 }) => {
-                    // 试听态下不插歌；按路径去重，不压撤销栈以免打乱用户的 u 操作
+                    // 试听态下不插歌；若带 expected_radio_id 且电台已切换/退出则丢弃旧推送；
+                    // 按路径去重，不压撤销栈以免打乱用户的 u 操作
                     if self.peek.is_some() || items.is_empty() {
+                        continue;
+                    }
+                    if let Some(expect_id) = expected_radio_id
+                        && self.radio.as_ref().map(|r| r.id) != Some(expect_id)
+                    {
                         continue;
                     }
                     let fresh: Vec<_> = items
@@ -77,16 +84,39 @@ impl Engine {
                     self.dirty = true;
                     self.emit(Event::QueueChanged);
                 }
+                Ok(ToEngine::StartRadio { seed, reply, .. }) => {
+                    self.start_radio(seed);
+                    let _ = reply.send(Ok(Reply::Status(Box::new(self.status()))));
+                }
+                Ok(ToEngine::StartRadioCurrent { reply, .. }) => {
+                    match self.queue.current_item().cloned() {
+                        Some(seed) => {
+                            self.start_radio(seed);
+                            let _ = reply.send(Ok(Reply::Status(Box::new(self.status()))));
+                        }
+                        None => {
+                            let _ = reply.send(Err("当前没有正在播放的曲子，无法创建电台".into()));
+                        }
+                    }
+                }
                 Ok(ToEngine::RecommendSnapshot { reply }) => {
+                    let duration_ms = self
+                        .queue
+                        .current_item()
+                        .map(|i| i.duration_ms)
+                        .unwrap_or(0);
                     let _ = reply.send(super::RecommendContext {
                         state: self.state,
                         current: self.queue.current,
+                        position_ms: self.position_ms(),
+                        duration_ms,
                         queue: self.queue.items.clone(),
                         playlists: self.playlists.clone(),
                         repeat: self.repeat,
                         random: self.random,
                         peeking: self.peek.is_some(),
                         auto_recommend: self.auto_recommend,
+                        radio: self.radio.as_ref().map(|r| (r.id, r.seed.clone())),
                     });
                 }
                 Ok(ToEngine::PurgePath { path, reply }) => {
@@ -98,8 +128,9 @@ impl Engine {
                         let _ = reply.send(Err("没有找到可播放的音频文件".into()));
                         continue;
                     }
-                    // 显式换队列 = 放弃试听恢复点
+                    // 显式换队列 = 放弃试听恢复点与电台态
                     self.peek = None;
+                    self.radio = None;
                     self.kill_decoder();
                     self.queue.items = items;
                     self.queue.current = None;
@@ -174,6 +205,32 @@ impl Engine {
                 self.persist();
             }
         }
+    }
+
+    /// 以指定种子歌开启电台模式：接管队列、种子作为第 1 首立即开播，关掉循环与随机，
+    /// 由后台推荐器按双锚点持续预缓冲下一首。
+    fn start_radio(&mut self, mut seed: super::queue::QueueItem) {
+        seed.recommended = false;
+        self.peek = None;
+        self.kill_decoder();
+        self.queue.items = vec![seed.clone()];
+        self.queue.current = None;
+        self.queue_origin = None;
+        self.repeat = crate::proto::RepeatMode::Off;
+        self.random = false;
+        self.radio_gen += 1;
+        self.radio = Some(super::RadioState {
+            id: self.radio_gen,
+            seed,
+        });
+        self.dirty = true;
+        self.emit(Event::QueueChanged);
+        self.emit(Event::ModeChanged {
+            repeat: self.repeat,
+            random: self.random,
+            auto_recommend: self.auto_recommend,
+        });
+        self.start_track(0, 0, true);
     }
 
     /// 永久删盘前的引擎清理：解析目标路径并校验在 `~/Music` 内，停播/切歌，

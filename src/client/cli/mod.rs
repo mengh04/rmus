@@ -233,6 +233,32 @@ pub(crate) fn run(mut cli: Cli) -> Result<()> {
             let value = client.request(Request::SetAutoRecommend { on })?;
             print_status(&status_reply(value)?);
         }
+        Command::Radio { query } => {
+            let joined = query.join(" ");
+            let trimmed = joined.trim();
+            if matches!(trimmed, "off" | "stop" | "关" | "退出") {
+                let value = client.request(Request::RadioStop)?;
+                println!("已退出电台模式");
+                print_status(&status_reply(value)?);
+            } else {
+                let req = if trimmed.is_empty() {
+                    Request::RadioStart {
+                        path: None,
+                        query: None,
+                    }
+                } else {
+                    Request::RadioStart {
+                        path: None,
+                        query: Some(trimmed.to_string()),
+                    }
+                };
+                let status = status_reply(client.request(req)?)?;
+                if let Some(radio) = &status.radio {
+                    println!("◉ 已创建电台：{} - {}（后续曲目自动推送）", radio.title, radio.artist);
+                }
+                print_status(&status);
+            }
+        }
         Command::Pl(pl) => handle_pl(&mut client, pl)?,
         Command::Quit => {
             client.request(Request::Quit)?;

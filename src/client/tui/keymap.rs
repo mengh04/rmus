@@ -77,6 +77,10 @@ pub enum Action {
     ToggleRandom,
     /// 自动推荐开关（播着播着自动插歌）
     ToggleAutoRecommend,
+    /// 以选中曲/当前曲创建种子电台（Apple Music 式）
+    StartRadio,
+    /// 退出电台模式
+    StopRadio,
     VolumeUp,
     VolumeDown,
     /// 打开搜索面板（telescope 式：实时过滤，Enter 插播）
@@ -124,6 +128,8 @@ pub fn resolve(key: KeyEvent) -> Option<Action> {
             'N' => Some(Prev),
             // vim P：put 到队列光标前
             'P' => Some(PutBefore),
+            // 退出电台模式
+            'T' => Some(StopRadio),
             _ => None,
         },
         // 不带修饰键的普通键
@@ -146,6 +152,7 @@ pub fn resolve(key: KeyEvent) -> Option<Action> {
             'r' => Some(CycleRepeat),
             'z' => Some(ToggleRandom),
             'f' => Some(ToggleAutoRecommend),
+            't' => Some(StartRadio),
             '+' | '=' => Some(VolumeUp),
             '-' => Some(VolumeDown),
             '[' => Some(Seek(-SEEK_STEP_MS)),
@@ -212,6 +219,7 @@ pub const HELP: &[(&str, &str)] = &[
     ("r", "循环模式 关→列表→单曲"),
     ("z", "随机播放开关"),
     ("f", "自动推荐开关（播着播着自动插歌，✦ 标记）"),
+    ("t / T", "以选中曲创建种子电台 · 退出电台"),
     ("+ / -", "音量加减"),
     ("[ / ]", "快退 / 快进 10 秒"),
     ("/", "搜索：库（拼音/首字母）；在线视图搜在线"),

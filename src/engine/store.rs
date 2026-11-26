@@ -17,6 +17,9 @@ pub struct PersistedState {
     pub random: Option<bool>,
     #[serde(default)]
     pub auto_recommend: Option<bool>,
+    /// 种子电台原始种子（重启后继续保持电台模式）
+    #[serde(default)]
+    pub radio: Option<QueueItem>,
     pub queue_name: Option<String>,
     pub current_index: Option<usize>,
     #[serde(default)]

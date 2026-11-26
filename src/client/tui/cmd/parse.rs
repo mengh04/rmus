@@ -21,6 +21,10 @@ pub enum Cmd {
     Random(Option<bool>),
     /// None = 自动推荐切换
     AutoRecommend(Option<bool>),
+    /// 创建种子电台：None = 以当前选中/播放曲建台；Some(q) = 搜库建台
+    RadioStart(Option<String>),
+    /// 退出电台模式
+    RadioStop,
     Add(PathBuf),
     Open(PathBuf),
     Peek(PathBuf),
@@ -91,6 +95,11 @@ pub fn parse(line: &str) -> Result<Cmd, String> {
             "off" | "关" => Some(false),
             _ => return Err(":auto 参数应为 on | off".into()),
         })),
+        "radio" | "station" => match rest {
+            "" => Ok(Cmd::RadioStart(None)),
+            "off" | "stop" | "关" | "退出" => Ok(Cmd::RadioStop),
+            q => Ok(Cmd::RadioStart(Some(q.into()))),
+        },
         "add" => path_arg(rest).map(Cmd::Add),
         "open" => path_arg(rest).map(Cmd::Open),
         "peek" => path_arg(rest).map(Cmd::Peek),
