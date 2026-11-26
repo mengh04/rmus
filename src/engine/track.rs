@@ -22,9 +22,41 @@ impl Engine {
         self.start_track(at, 0, true);
     }
 
+    /// 上报当前曲目的听歌结束事件（完播 / 切歌 / 停止），每曲至多上报一次；
+    /// 播放不足 2 秒且非 EOF 的忽略（如连续快速按 n 翻歌）。
+    pub(super) fn emit_track_finished(&mut self, eof: bool) {
+        if self.track_recorded || self.state == PlayState::Stopped {
+            return;
+        }
+        let Some(item) = self.queue.current_item().cloned() else {
+            return;
+        };
+        let played_ms = if eof && item.duration_ms > 0 {
+            self.position_ms().max(item.duration_ms)
+        } else {
+            self.position_ms()
+        };
+        self.track_recorded = true;
+        if !eof && played_ms < 2_000 {
+            return;
+        }
+        self.emit(Event::TrackFinished {
+            path: item.path,
+            title: item.title,
+            artist: item.artist,
+            played_ms,
+            duration_ms: item.duration_ms,
+            eof,
+        });
+    }
+
     /// 核心：从 index 曲的 position_ms 处开始播放。
     /// 杀旧解码线程 -> 重建输出流 -> 起新解码线程。
     pub(super) fn start_track(&mut self, index: usize, position_ms: u64, autoplay: bool) {
+        // 切到另一首时记录上一首的实际播放时长（同曲 seek 不上报）
+        if self.queue.current != Some(index) {
+            self.emit_track_finished(false);
+        }
         self.kill_decoder();
 
         let Ok(()) = self.output.reset() else {
@@ -34,6 +66,7 @@ impl Engine {
 
         self.queue.current = Some(index);
         self.seek_base_ms = position_ms;
+        self.track_recorded = false;
         self.dirty = true;
 
         // kill_decoder 已把计数 +1 作废旧线程；这里再 +1 作为新线程的代号

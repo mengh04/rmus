@@ -37,6 +37,7 @@ pub(crate) fn print_status(status: &StatusInfo) {
         RepeatMode::One => "单曲循环",
     };
     let random = if status.random { "随机" } else { "顺序" };
+    let auto_rec = if status.auto_recommend { "/推荐开" } else { "" };
     let queue = status.queue_name.clone().unwrap_or_else(|| "临时".into());
     let peek = if status.peeking {
         "  ♪试听中(rmus back 恢复)"
@@ -47,7 +48,7 @@ pub(crate) fn print_status(status: &StatusInfo) {
         Some(track) => {
             println!("{state}  {} - {}", track.title, track.artist);
             println!(
-                "  {} / {}   音量 {volume}%   {repeat}/{random}   队列[{queue}] {}/{}{peek}",
+                "  {} / {}   音量 {volume}%   {repeat}/{random}{auto_rec}   队列[{queue}] {}/{}{peek}",
                 fmt_mmss(status.position_ms),
                 fmt_mmss(status.duration_ms),
                 status.current.map(|i| i + 1).unwrap_or(0),
@@ -56,7 +57,7 @@ pub(crate) fn print_status(status: &StatusInfo) {
         }
         None => {
             println!(
-                "{state}   音量 {volume}%   {repeat}/{random}   队列[{queue}] {} 首",
+                "{state}   音量 {volume}%   {repeat}/{random}{auto_rec}   队列[{queue}] {} 首",
                 status.queue_len
             );
         }

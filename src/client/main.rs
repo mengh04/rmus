@@ -57,6 +57,15 @@ enum Command {
     Clear,
     /// 删除队列中的曲子：无参数 = 删掉正在播放的这首（自动续播下一首）；数字 = 删第 index 首
     Remove { index: Option<usize> },
+    /// 永久删除音乐库原文件并加入推荐拉黑名单（无参数 = 当前正在播的这首）
+    #[command(alias = "delete")]
+    Rm {
+        /// 跳过确认提示直接永久删除
+        #[arg(short = 'y', long)]
+        yes: bool,
+        /// 指定要删除的音频文件路径（省略 = 正在播放的曲子）
+        path: Option<PathBuf>,
+    },
     /// 调整队列顺序：把第 from 首移到第 to 的位置（下标从 0 开始）
     Move { from: usize, to: usize },
     /// 打乱队列（当前曲移到队首）
@@ -65,12 +74,17 @@ enum Command {
     Repeat { mode: Option<String> },
     /// 随机播放：无参数切换；或 on/off
     Random { mode: Option<String> },
+    /// 自动推荐（播着播着自动插歌）：无参数切换；或 on/off
+    Auto { mode: Option<String> },
     /// 播放列表管理
     #[command(subcommand)]
     Pl(Pl),
     /// 库操作
     #[command(subcommand)]
     Lib(Lib),
+    /// Last.fm 授权与 Scrobble 状态
+    #[command(subcommand)]
+    Lastfm(LastfmCmd),
     /// 库模糊搜索，列出候选（`rmus find secret`）
     Find { query: String },
     /// 试听：保存当前状态，临时换成这些文件播放；播完自动恢复原队列与进度
@@ -127,6 +141,18 @@ enum Pl {
 enum Lib {
     /// 全量重建库索引（扫描 ~/Music）
     Rescan,
+}
+
+#[derive(Subcommand)]
+enum LastfmCmd {
+    /// 桌面授权：在浏览器确认后换取永久 session_key，开启自动 Scrobble
+    Auth {
+        /// 若已有已授权的 token，直接换取 session_key（跳过交互提示）
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// 查看 Last.fm 配置与 Scrobble 授权状态
+    Status,
 }
 
 fn main() -> Result<()> {

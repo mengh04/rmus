@@ -40,6 +40,8 @@ pub enum Action {
     RemoveSelected,
     /// 删除正在播放的曲目
     RemoveCurrent,
+    /// 永久删除选中曲的原文件并拉黑（Shift+X，需确认）
+    DeleteSelectedFile,
     /// 队列内把选中曲上移 / 下移一位
     MoveUp,
     MoveDown,
@@ -73,6 +75,8 @@ pub enum Action {
     MarkClear,
     /// 随机播放开关
     ToggleRandom,
+    /// 自动推荐开关（播着播着自动插歌）
+    ToggleAutoRecommend,
     VolumeUp,
     VolumeDown,
     /// 打开搜索面板（telescope 式：实时过滤，Enter 插播）
@@ -108,6 +112,7 @@ pub fn resolve(key: KeyEvent) -> Option<Action> {
             'M' => Some(MarkClear),
             'B' => Some(Back),
             'D' => Some(RemoveCurrent),
+            'X' => Some(DeleteSelectedFile),
             'C' => Some(ClearQueue),
             'S' => Some(Shuffle),
             'R' => Some(Rescan),
@@ -140,6 +145,7 @@ pub fn resolve(key: KeyEvent) -> Option<Action> {
             'c' => Some(RenameSelected),
             'r' => Some(CycleRepeat),
             'z' => Some(ToggleRandom),
+            'f' => Some(ToggleAutoRecommend),
             '+' | '=' => Some(VolumeUp),
             '-' => Some(VolumeDown),
             '[' => Some(Seek(-SEEK_STEP_MS)),
@@ -190,6 +196,7 @@ pub const HELP: &[(&str, &str)] = &[
     ("v", "visual 选段：d 剪切 / y 复制 / o 对调 / Esc 退出"),
     ("m / M", "间隔标记当前行 · 清空标记（标记后 d/y 收割）"),
     ("D / x", "删除正在播放的曲"),
+    ("X", "永久删除原文件并拉黑（队列 / 音乐库，需确认）"),
     ("d / Enter / x", "在线视图：下载 / 下载并试听 / 取消下载"),
     ("插件视图", "i 按键直通（Esc 退出）· r 刷新视图 · Enter 转发"),
     ("yy", "复制选中曲到寄存器（队列 / 音乐库）"),
@@ -204,6 +211,7 @@ pub const HELP: &[(&str, &str)] = &[
     ("u / C-r", "撤销 / 重做队列改动"),
     ("r", "循环模式 关→列表→单曲"),
     ("z", "随机播放开关"),
+    ("f", "自动推荐开关（播着播着自动插歌，✦ 标记）"),
     ("+ / -", "音量加减"),
     ("[ / ]", "快退 / 快进 10 秒"),
     ("/", "搜索：库（拼音/首字母）；在线视图搜在线"),

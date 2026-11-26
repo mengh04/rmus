@@ -7,7 +7,7 @@ mod format;
 mod playlist;
 pub(crate) mod plugin_cli;
 
-use crate::{Cli, Command, Lib, Pl};
+use crate::{Cli, Command, LastfmCmd, Lib, Pl};
 use anyhow::{Context, Result, bail};
 use format::{
     connect, fmt_mmss, parse_repeat, parse_seek, parse_volume, print_status, status_of,
@@ -33,6 +33,11 @@ pub(crate) fn run(mut cli: Cli) -> Result<()> {
         return rmus::client::tui::run(cli.socket.clone(), cli.no_spawn);
     };
 
+    // Last.fm 授权与状态纯本地操作，无需连 daemon
+    if let Command::Lastfm(sub) = command {
+        return handle_lastfm(sub);
+    }
+
     let mut client = connect(&cli)?;
     match command {
         Command::Add { paths } => {
@@ -47,6 +52,7 @@ pub(crate) fn run(mut cli: Cli) -> Result<()> {
             let added = value.get("added").and_then(|v| v.as_u64()).unwrap_or(0);
             println!("库索引已重建：{added} 首");
         }
+        Command::Lastfm(_) => unreachable!("Lastfm 已在连接前处理"),
         Command::Peek { paths } => {
             print_status(&status_reply(client.request(Request::Peek {
                 paths: paths.clone(),
@@ -133,8 +139,9 @@ pub(crate) fn run(mut cli: Cli) -> Result<()> {
                 } else {
                     format!(" - {}", track.artist)
                 };
+                let rec = if track.recommended { "✦ " } else { "" };
                 println!(
-                    "{marker} {:>3} {}{} [{}]",
+                    "{marker} {:>3} {rec}{}{} [{}]",
                     track.index,
                     track.title,
                     artist,
@@ -151,6 +158,42 @@ pub(crate) fn run(mut cli: Cli) -> Result<()> {
             match index {
                 Some(i) => println!("已删除第 {i} 首"),
                 None => println!("已删除当前曲"),
+            }
+        }
+        Command::Rm { yes, path } => {
+            use std::io::{IsTerminal, Write};
+            if !yes && std::io::stdin().is_terminal() {
+                let label = match path {
+                    Some(p) => p
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| p.display().to_string()),
+                    None => {
+                        let status = status_of(&mut client)?;
+                        match status.track {
+                            Some(t) if !t.artist.is_empty() => format!("{} - {}", t.title, t.artist),
+                            Some(t) => t.title,
+                            None => bail!("当前没有正在播放的曲子"),
+                        }
+                    }
+                };
+                print!("永久删除原文件并拉黑《{label}》？[y/N] ");
+                std::io::stdout().flush()?;
+                let mut answer = String::new();
+                std::io::stdin().read_line(&mut answer)?;
+                if !matches!(answer.trim(), "y" | "Y" | "yes" | "YES") {
+                    println!("已取消");
+                    return Ok(());
+                }
+            }
+            let value = client.request(Request::DeleteFile { path: path.clone() })?;
+            let title = value.get("title").and_then(|v| v.as_str()).unwrap_or("?");
+            let artist = value.get("artist").and_then(|v| v.as_str()).unwrap_or("");
+            let deleted_path = value.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            if artist.is_empty() {
+                println!("已永久删除并拉黑：{title}（{deleted_path}）");
+            } else {
+                println!("已永久删除并拉黑：{title} - {artist}（{deleted_path}）");
             }
         }
         Command::Shuffle => {
@@ -180,6 +223,16 @@ pub(crate) fn run(mut cli: Cli) -> Result<()> {
             let value = client.request(Request::SetRandom { on })?;
             print_status(&status_reply(value)?);
         }
+        Command::Auto { mode } => {
+            let on = match mode.as_deref() {
+                None => None,
+                Some("on") | Some("1") | Some("true") => Some(true),
+                Some("off") | Some("0") | Some("false") => Some(false),
+                Some(other) => bail!("auto 参数应为 on/off，收到 {other}"),
+            };
+            let value = client.request(Request::SetAutoRecommend { on })?;
+            print_status(&status_reply(value)?);
+        }
         Command::Pl(pl) => handle_pl(&mut client, pl)?,
         Command::Quit => {
             client.request(Request::Quit)?;
@@ -199,7 +252,7 @@ pub(crate) fn run(mut cli: Cli) -> Result<()> {
                 .cloned()
                 .unwrap_or_default();
             if plugins.is_empty() {
-                println!("未发现插件（插件目录见 docs/plugins.md）");
+                println!("没有已注册模块");
             }
             for p in &plugins {
                 let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("?");
@@ -290,6 +343,9 @@ fn restart(cli: &Cli) -> Result<()> {
                     client.request(Request::Play { index: Some(index) })?;
                 }
                 client.request(Request::SetRandom { on: Some(status.random) })?;
+                client.request(Request::SetAutoRecommend {
+                    on: Some(status.auto_recommend),
+                })?;
                 if status.position_ms > 0 {
                     client.request(Request::Seek {
                         position_ms: status.position_ms,
@@ -323,6 +379,68 @@ fn normalize(cli: &mut Cli) {    cli.paths = absolutize(&cli.paths);
     }
     if let Some(Command::Peek { paths }) = cli.command.as_mut() {
         *paths = absolutize(paths);
+    }
+    if let Some(Command::Rm {
+        path: Some(path), ..
+    }) = cli.command.as_mut()
+    {
+        *path = std::path::absolute(&*path).unwrap_or_else(|_| path.clone());
+    }
+}
+
+fn handle_lastfm(cmd: &LastfmCmd) -> Result<()> {
+    use std::io::Write;
+    let data_dir = rmus::plugin::data_root();
+    let path = rmus_fm::lastfm::config_path(&data_dir);
+    let mut cfg = rmus_fm::lastfm::load_config(&data_dir)
+        .with_context(|| format!("未找到有效的 Last.fm 配置（{}）", path.display()))?;
+
+    match cmd {
+        LastfmCmd::Status => {
+            println!("Last.fm 状态");
+            println!(
+                "  用户      {}",
+                if cfg.username.is_empty() { "未设置" } else { &cfg.username }
+            );
+            println!("  推荐 API  已配置");
+            println!(
+                "  Scrobble  {}",
+                if cfg.can_scrobble() {
+                    "已授权（播完自动上报）"
+                } else {
+                    "未授权（运行 `rmus lastfm auth` 完成一次浏览器授权）"
+                }
+            );
+            println!("  配置文件  {}", path.display());
+            Ok(())
+        }
+        LastfmCmd::Auth { token } => {
+            let tok = match token {
+                Some(t) => t.clone(),
+                None => {
+                    let t = rmus_fm::lastfm::get_token(&cfg)?;
+                    let url = rmus_fm::lastfm::auth_url(&cfg.api_key, &t);
+                    println!("请在浏览器打开以下链接并点击「Yes, allow access」：\n\n  {url}\n");
+                    let _ = std::process::Command::new("xdg-open")
+                        .arg(&url)
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn();
+                    print!("在浏览器完成授权后按回车继续…");
+                    std::io::stdout().flush()?;
+                    let mut line = String::new();
+                    std::io::stdin().read_line(&mut line)?;
+                    t
+                }
+            };
+            let (name, session_key) = rmus_fm::lastfm::get_session(&cfg, &tok)?;
+            cfg.username = name.clone();
+            cfg.session_key = session_key;
+            rmus_fm::lastfm::save_config(&data_dir, &cfg)?;
+            println!("✓ Last.fm 授权成功（用户 {name}），已自动开启 Scrobble 与 Now Playing（无需重启 rmusd）");
+            Ok(())
+        }
     }
 }
 

@@ -79,10 +79,15 @@ pub(super) async fn handle_event(
                 .properties_changed([Property::Volume(f64::from(value))])
                 .await;
         }
-        Event::ModeChanged { repeat, random } => {
+        Event::ModeChanged {
+            repeat,
+            random,
+            auto_recommend,
+        } => {
             let mut data = shared.write().await;
             data.status.repeat = repeat;
             data.status.random = random;
+            data.status.auto_recommend = auto_recommend;
             drop(data);
             let _ = server
                 .properties_changed([
@@ -93,7 +98,7 @@ pub(super) async fn handle_event(
         }
         // 插件事件与桌面媒体接口无关
         Event::Plugin { .. } | Event::PluginView { .. } => {}
-        // 播放错误只走客户端提示，桌面侧不显示
-        Event::Error { .. } => {}
+        // 播放错误与听歌统计事件与桌面媒体接口无关
+        Event::Error { .. } | Event::TrackFinished { .. } => {}
     }
 }

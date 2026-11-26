@@ -56,34 +56,37 @@ pub fn draw_row(
         theme.style_faint()
     };
 
-    let mut put = |x: u16, w: u16, span: Span<'static>, align: Alignment| {
+    let mut put = |x: u16, w: u16, line: Line<'static>, align: Alignment| {
         if w == 0 {
             return;
         }
         let rect = Rect::new(x, area.y, w, 1);
-        frame.render_widget(Paragraph::new(Line::from(span)).alignment(align), rect);
+        frame.render_widget(Paragraph::new(line).alignment(align), rect);
     };
 
     put(
         cols.index_x,
         cols.index_w,
-        Span::styled(
+        Line::from(Span::styled(
             format!("{:>w$}", track.index + 1, w = cols.index_w as usize),
             index_style,
-        ),
+        )),
         Alignment::Left,
     );
-    put(
-        cols.title_x,
-        cols.title_w,
-        Span::styled(fit(&track.title, cols.title_w), title_style),
-        Alignment::Left,
-    );
+    let title_line = if track.recommended && cols.title_w > 2 {
+        Line::from(vec![
+            Span::styled("✦ ", theme.style_accent()),
+            Span::styled(fit(&track.title, cols.title_w - 2), title_style),
+        ])
+    } else {
+        Line::from(Span::styled(fit(&track.title, cols.title_w), title_style))
+    };
+    put(cols.title_x, cols.title_w, title_line, Alignment::Left);
     if cols.artist_w > 0 {
         put(
             cols.artist_x,
             cols.artist_w,
-            Span::styled(fit(&track.artist, cols.artist_w), theme.style_muted()),
+            Line::from(Span::styled(fit(&track.artist, cols.artist_w), theme.style_muted())),
             Alignment::Left,
         );
     }
@@ -91,21 +94,21 @@ pub fn draw_row(
         put(
             cols.album_x,
             cols.album_w,
-            Span::styled(fit(&track.album, cols.album_w), theme.style_faint()),
+            Line::from(Span::styled(fit(&track.album, cols.album_w), theme.style_faint())),
             Alignment::Left,
         );
     }
     put(
         cols.dur_x,
         cols.dur_w,
-        Span::styled(
+        Line::from(Span::styled(
             if track.duration_ms > 0 {
                 fmt_mmss(track.duration_ms)
             } else {
                 "--:--".to_owned()
             },
             theme.style_faint(),
-        ),
+        )),
         Alignment::Right,
     );
 }

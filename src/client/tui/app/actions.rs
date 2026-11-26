@@ -88,6 +88,7 @@ impl App {
                     self.need_queue = true;
                 }
             },
+            DeleteSelectedFile => self.prompt_delete_selected(),
             MoveUp => self.move_selected(-1),
             MoveDown => self.move_selected(1),
             AddSelected => match self.tab {
@@ -135,6 +136,7 @@ impl App {
             MarkToggle => self.toggle_mark(),
             MarkClear => self.clear_marks(),
             ToggleRandom => self.simple(Request::SetRandom { on: None }),
+            ToggleAutoRecommend => self.simple(Request::SetAutoRecommend { on: None }),
             VolumeUp => self.simple(Request::AdjustVolume { delta: 0.05 }),
             VolumeDown => self.simple(Request::AdjustVolume { delta: -0.05 }),
             Search => match &self.tab {
@@ -193,6 +195,28 @@ impl App {
             self.notify(format!("{e}"), true);
         }
         self.need_status = true;
+    }
+
+    /// 弹出永久删除原文件并拉黑的确认态（队列/音乐库取选中行，其余视图取正在播的曲目）。
+    pub(super) fn prompt_delete_selected(&mut self) {
+        let track = match self.tab {
+            Tab::Queue => self.queue.get(self.queue_selected).cloned(),
+            Tab::Library => self.library.get(self.library_selected).cloned(),
+            _ => self.status.as_ref().and_then(|s| s.track.clone()),
+        };
+        let Some(track) = track else {
+            self.notify("没有可删除的曲目", true);
+            return;
+        };
+        let label = if track.artist.is_empty() {
+            track.title
+        } else {
+            format!("{} - {}", track.title, track.artist)
+        };
+        self.mode = super::Mode::ConfirmDelete {
+            path: track.path,
+            label,
+        };
     }
 
     /// 全量重建库索引，完成后提示曲目数。

@@ -53,6 +53,7 @@ impl Engine {
         self.emit(Event::ModeChanged {
             repeat: self.repeat,
             random: self.random,
+            auto_recommend: self.auto_recommend,
         });
         self.start_track(0, 0, true);
     }
@@ -74,6 +75,7 @@ impl Engine {
         self.emit(Event::ModeChanged {
             repeat: self.repeat,
             random: self.random,
+            auto_recommend: self.auto_recommend,
         });
         match current {
             Some(i) if i < self.queue.items.len() => {

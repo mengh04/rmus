@@ -232,6 +232,7 @@ impl Engine {
                 self.emit(Event::ModeChanged {
                     repeat: self.repeat,
                     random: self.random,
+                    auto_recommend: self.auto_recommend,
                 });
                 Ok(Reply::Status(Box::new(self.status())))
             }
@@ -241,6 +242,17 @@ impl Engine {
                 self.emit(Event::ModeChanged {
                     repeat: self.repeat,
                     random: self.random,
+                    auto_recommend: self.auto_recommend,
+                });
+                Ok(Reply::Status(Box::new(self.status())))
+            }
+            Request::SetAutoRecommend { on } => {
+                self.auto_recommend = on.unwrap_or(!self.auto_recommend);
+                self.dirty = true;
+                self.emit(Event::ModeChanged {
+                    repeat: self.repeat,
+                    random: self.random,
+                    auto_recommend: self.auto_recommend,
                 });
                 Ok(Reply::Status(Box::new(self.status())))
             }
@@ -259,8 +271,10 @@ impl Engine {
                 }
                 None => Err("当前没有试听在等待恢复".into()),
             },
-            // Add/Open/PlaylistAdd/Peek 由 daemon 层拦截扫描，不应到达这里
+            // Add/InsertNext/Open/PlaylistAdd/Peek/DeleteFile 由 daemon 层拦截处理，不应到达这里
             Request::Add { .. } => Err("内部错误：Add 未在 daemon 层处理".into()),
+            Request::InsertNext { .. } => Err("内部错误：InsertNext 未在 daemon 层处理".into()),
+            Request::DeleteFile { .. } => Err("内部错误：DeleteFile 未在 daemon 层处理".into()),
             Request::Open { .. } => Err("内部错误：Open 未在 daemon 层处理".into()),
             Request::Peek { .. } => Err("内部错误：Peek 未在 daemon 层处理".into()),
             Request::PlaylistAdd { .. } => Err("内部错误：PlaylistAdd 未在 daemon 层处理".into()),

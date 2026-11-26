@@ -239,6 +239,7 @@ mod tests {
             artist: artist.into(),
             album: "专辑".into(),
             duration_ms: 0,
+            recommended: false,
         }
     }
 

@@ -113,6 +113,7 @@ pub(crate) async fn dispatch(
                     artist: item.artist.clone(),
                     album: item.album.clone(),
                     duration_ms: item.duration_ms,
+                    recommended: false,
                 })
                 .collect()
         };
@@ -138,6 +139,7 @@ pub(crate) async fn dispatch(
                     artist: entry.item.artist.clone(),
                     album: entry.item.album.clone(),
                     duration_ms: entry.item.duration_ms,
+                    recommended: false,
                 })
                 .collect()
         };
@@ -205,7 +207,11 @@ pub(crate) async fn dispatch(
 
     let replace = matches!(msg.request, Request::Open { .. });
     let peeking = matches!(msg.request, Request::Peek { .. });
-    if let Request::Add { paths } | Request::Open { paths } | Request::Peek { paths } = msg.request
+    let insert_next = matches!(msg.request, Request::InsertNext { .. });
+    if let Request::Add { paths }
+    | Request::InsertNext { paths }
+    | Request::Open { paths }
+    | Request::Peek { paths } = msg.request
     {
         // 扫描可能耗时（大目录 + 逐文件读 tag），放阻塞线程池
         let cmd_tx = cmd_tx.clone();
@@ -223,6 +229,12 @@ pub(crate) async fn dispatch(
                 })
             } else if replace {
                 cmd_tx.send(ToEngine::OpenScanned {
+                    id,
+                    items,
+                    reply: reply_tx,
+                })
+            } else if insert_next {
+                cmd_tx.send(ToEngine::InsertNextScanned {
                     id,
                     items,
                     reply: reply_tx,
@@ -260,6 +272,105 @@ pub(crate) async fn dispatch(
                 return;
             }
             send_reply(id, reply_rx.await, &out_tx);
+        });
+        return;
+    }
+
+    if let Request::DeleteFile { path } = msg.request {
+        let cmd_tx = cmd_tx.clone();
+        let out_tx = out_tx.clone();
+        let library = library.clone();
+        tokio::spawn(async move {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            if cmd_tx
+                .send(ToEngine::PurgePath {
+                    path: path.clone(),
+                    reply: reply_tx,
+                })
+                .is_err()
+            {
+                return;
+            }
+            let purged = match reply_rx.await {
+                Ok(Ok(item)) => item,
+                Ok(Err(e)) => {
+                    let json = serde_json::to_string(&error_reply(id, e)).unwrap_or_default();
+                    let _ = out_tx.send(json);
+                    return;
+                }
+                Err(_) => {
+                    let json = serde_json::to_string(&error_reply(id, "引擎无响应".into()))
+                        .unwrap_or_default();
+                    let _ = out_tx.send(json);
+                    return;
+                }
+            };
+
+            let target_path = purged
+                .as_ref()
+                .map(|i| i.path.clone())
+                .or(path)
+                .unwrap_or_default();
+
+            // 补齐 title/artist（库视图删未入队曲目时从库索引取）
+            let (title, artist) = match purged {
+                Some(item) => (item.title, item.artist),
+                None => {
+                    let lib = library.read().unwrap();
+                    lib.iter()
+                        .find(|e| e.item.path == target_path)
+                        .map(|e| (e.item.title.clone(), e.item.artist.clone()))
+                        .unwrap_or_else(|| {
+                            let stem = target_path
+                                .file_stem()
+                                .map(|s| s.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| target_path.display().to_string());
+                            (stem, String::new())
+                        })
+                }
+            };
+
+            let del_path = target_path.clone();
+            let remove_res = tokio::task::spawn_blocking(move || std::fs::remove_file(&del_path))
+                .await
+                .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string())));
+            if let Err(e) = remove_res
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                let json = serde_json::to_string(&error_reply(
+                    id,
+                    format!("删除文件失败（{}）：{e}", target_path.display()),
+                ))
+                .unwrap_or_default();
+                let _ = out_tx.send(json);
+                return;
+            }
+
+            // 同步更新内存库索引并落盘（无需等 watch.rs 2s 防抖）
+            {
+                let mut lib = library.write().unwrap();
+                lib.retain(|e| e.item.path != target_path);
+                let snapshot = lib.clone();
+                drop(lib);
+                tokio::task::spawn_blocking(move || library::save(&snapshot));
+            }
+
+            // 永久写入推荐拉黑名单（自动推荐 / rmus-fm / rmus-dj 共用）
+            let (bt, ba) = (title.clone(), artist.clone());
+            tokio::task::spawn_blocking(move || {
+                rmus_plugin_sdk::blocklist::add(&rmus::plugin::data_root(), &bt, &ba);
+            });
+
+            let json = serde_json::to_string(&ServerMsg::Reply {
+                id,
+                result: Reply::Deleted {
+                    path: target_path,
+                    title,
+                    artist,
+                },
+            })
+            .unwrap_or_default();
+            let _ = out_tx.send(json);
         });
         return;
     }

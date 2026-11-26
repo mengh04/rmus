@@ -4,6 +4,10 @@ use crate::proto::TrackInfo;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueueItem {
     pub path: PathBuf,
@@ -11,6 +15,8 @@ pub struct QueueItem {
     pub artist: String,
     pub album: String,
     pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub recommended: bool,
 }
 
 #[derive(Debug, Default)]
@@ -41,6 +47,7 @@ impl Queue {
             artist: item.artist.clone(),
             album: item.album.clone(),
             duration_ms: item.duration_ms,
+            recommended: item.recommended,
         })
     }
 
@@ -160,6 +167,7 @@ mod tests {
                     artist: String::new(),
                     album: String::new(),
                     duration_ms: 0,
+                    recommended: false,
                 })
                 .collect(),
             current,

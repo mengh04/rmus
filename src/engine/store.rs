@@ -15,6 +15,8 @@ pub struct PersistedState {
     pub volume: Option<f64>,
     pub repeat: Option<RepeatMode>,
     pub random: Option<bool>,
+    #[serde(default)]
+    pub auto_recommend: Option<bool>,
     pub queue_name: Option<String>,
     pub current_index: Option<usize>,
     #[serde(default)]

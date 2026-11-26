@@ -1,0 +1,14 @@
+[package]
+name = "rmus-fm"
+version = "0.1.0"
+edition = "2024"
+description = "rmus 免费 API 推荐模块（Deezer 榜单+歌手热门→验证→下载→入库）"
+license = "MIT"
+publish = false
+
+[dependencies]
+rmus-plugin-sdk = { path = "../plugin-sdk" }
+rmus-sources = { path = "../rmus-sources" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"

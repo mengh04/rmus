@@ -50,8 +50,13 @@ pinyin = "0.10"
 # 终端显示宽度：CJK 双宽字符的列对齐/截断（ratatui 内部同版本）
 unicode-width = "0.2"
 
-# wasm 插件宿主（UI 插件：wasmi 实例化、manifest 握手、按键/渲染通道）
-wasm-host = { path = "crates/wasm-host" }
+# 内建原生插件模块（多 crate 静态集成，无 wasm 运行时）
+rmus-plugin-sdk = { path = "crates/plugin-sdk" }
+rmus-sources = { path = "crates/rmus-sources" }
+rmus-dl = { path = "crates/rmus-dl" }
+rmus-podcast = { path = "crates/rmus-podcast" }
+rmus-fm = { path = "crates/rmus-fm" }
+rmus-dj = { path = "crates/rmus-dj" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # MPRIS（D-Bus 媒体播放器接口，系统媒体控制/键盘媒体键/播放器小组件）

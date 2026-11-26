@@ -19,6 +19,8 @@ pub enum Cmd {
     Repeat(Option<RepeatMode>),
     /// None = 随机切换
     Random(Option<bool>),
+    /// None = 自动推荐切换
+    AutoRecommend(Option<bool>),
     Add(PathBuf),
     Open(PathBuf),
     Peek(PathBuf),
@@ -31,6 +33,7 @@ pub enum Cmd {
         path: PathBuf,
     },
     Rescan,
+    DeleteFile,
     Help,
 }
 
@@ -82,6 +85,12 @@ pub fn parse(line: &str) -> Result<Cmd, String> {
             "off" | "关" => Some(false),
             _ => return Err(":rand 参数应为 on | off".into()),
         })),
+        "auto" | "rec" | "recommend" => Ok(Cmd::AutoRecommend(match rest {
+            "" => None,
+            "on" | "开" => Some(true),
+            "off" | "关" => Some(false),
+            _ => return Err(":auto 参数应为 on | off".into()),
+        })),
         "add" => path_arg(rest).map(Cmd::Add),
         "open" => path_arg(rest).map(Cmd::Open),
         "peek" => path_arg(rest).map(Cmd::Peek),
@@ -89,6 +98,7 @@ pub fn parse(line: &str) -> Result<Cmd, String> {
         "pm" | "playmatch" => Err(":pm 需要搜索词".into()),
         "pl" | "playlist" => parse_playlist(rest),
         "rescan" => argless(rest, Cmd::Rescan),
+        "rm" | "del" | "delete" => argless(rest, Cmd::DeleteFile),
         "help" | "h" => argless(rest, Cmd::Help),
         _ => Err(format!("未知命令 “{name}”（:help 查看全部）")),
     }

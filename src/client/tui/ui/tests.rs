@@ -16,6 +16,7 @@ fn track(index: usize, title: &str, artist: &str, album: &str, dur: u64) -> Trac
         artist: artist.into(),
         album: album.into(),
         duration_ms: dur,
+        recommended: false,
     }
 }
 
@@ -31,6 +32,7 @@ fn demo_app() -> App {
         track: Some(track(1, "红豆", "王菲", "唱游", 276_000)),
         repeat: RepeatMode::All,
         random: false,
+        auto_recommend: false,
         queue_name: Some("深夜循环".into()),
         queue_modified: true,
         peeking: false,

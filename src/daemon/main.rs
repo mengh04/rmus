@@ -14,9 +14,12 @@
 
 mod conn;
 mod dispatch;
+mod history;
 mod mpris;
 mod plugin_host;
+mod recommend;
 mod reply;
+mod scrobble;
 mod watch;
 
 use anyhow::{Context, Result, bail};
@@ -91,11 +94,15 @@ fn main() -> Result<()> {
         // 实时监听库目录：新文件落地后自动更新索引（防抖 2s）
         spawn_library_watcher(library.clone())?;
 
-        // 插件宿主：扫描插件目录、握手、按需托管会话
-        let plugins = plugin_host::PluginHost::discover(events_tx.clone(), cmd_tx.clone(), library.clone()).await;
-        if plugins.is_empty() {
-            println!("[rmusd] 未发现插件（可选装，不影响播放）");
-        }
+        // 插件宿主：注册内建原生模块（在线下载 / 播客 / FM / DJ）
+        let plugins =
+            plugin_host::PluginHost::new(events_tx.clone(), cmd_tx.clone(), library.clone());
+
+        // 自动推荐器（零 LLM）：播着播着自动队尾续播 / 播中穿插
+        recommend::spawn(cmd_tx.clone(), events_tx.subscribe(), library.clone());
+
+        // Last.fm 自动 Scrobble + Now Playing（授权后自动生效，跳过播客）
+        scrobble::spawn(cmd_tx.clone(), events_tx.subscribe());
 
         // 信号处理：退出时清理 socket 文件与插件子进程
         let sock_for_cleanup = sock.clone();

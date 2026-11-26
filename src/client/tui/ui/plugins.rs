@@ -66,14 +66,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let Some((_plugin, view, tab_selected)) = view_of(app) else {
         let (title, hint) = match &app.tab {
-            Tab::Plugin(pt) => (
-                format!("{} 不可用", pt.title),
-                "插件缺失或未加载（把编译好的 .wasm 放入插件目录后重启 rmusd）",
-            ),
-            _ => (
-                "没有 UI 插件".into(),
-                "把编译好的 .wasm 插件放入插件目录后重启 rmusd",
-            ),
+            Tab::Plugin(pt) => (format!("{} 加载中", pt.title), "正在同步模块视图…"),
+            _ => ("没有可用模块".into(), "当前没有注册画布的模块"),
         };
         empty_state(frame, theme, area, &title, hint);
         return;

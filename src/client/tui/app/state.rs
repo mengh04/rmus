@@ -117,6 +117,11 @@ pub enum Mode {
     /// 候选列表：输入模糊过滤，Enter 确认（`picker::handle_key` 处理）
     Picker,
     Input(InputPurpose),
+    /// 永久删除原文件并拉黑的二次确认（y 确认，其他键取消）
+    ConfirmDelete {
+        path: std::path::PathBuf,
+        label: String,
+    },
 }
 
 /// 搜索面板内的子模式：字母键要么进关键词，要么当动作（vim normal）。

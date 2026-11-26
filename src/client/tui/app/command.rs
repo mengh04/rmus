@@ -24,6 +24,7 @@ impl App {
             },
             Cmd::Repeat(mode) => self.simple(Request::SetRepeat { mode }),
             Cmd::Random(on) => self.simple(Request::SetRandom { on }),
+            Cmd::AutoRecommend(on) => self.simple(Request::SetAutoRecommend { on }),
             Cmd::Add(path) => self.load_paths(|paths| Request::Add { paths }, path, "已加入队列"),
             Cmd::Open(path) => {
                 self.load_paths(|paths| Request::Open { paths }, path, "已替换队列并播放")
@@ -72,6 +73,7 @@ impl App {
                 self.notify(format!("已加入播放列表 “{name}”"), false);
             }
             Cmd::Rescan => self.rescan_library(),
+            Cmd::DeleteFile => self.prompt_delete_selected(),
             Cmd::Help => self.help_open = true,
         }
     }

@@ -37,6 +37,7 @@ impl Engine {
     }
 
     pub(super) fn stop(&mut self) {
+        self.emit_track_finished(false);
         self.kill_decoder();
         self.output.reset().ok();
         self.seek_base_ms = 0;
@@ -48,6 +49,7 @@ impl Engine {
 
     /// 下一曲（EOF 自动推进）。单曲循环时重播当前曲；否则按模式选曲。
     pub(super) fn on_eof(&mut self) {
+        self.emit_track_finished(true);
         if self.repeat == RepeatMode::One && self.queue.current.is_some() {
             let cur = self.queue.current.expect("已检查 Some");
             self.start_track(cur, 0, true);
@@ -85,6 +87,17 @@ impl Engine {
             return None;
         }
         if self.random && len > 1 {
+            // 随机模式下若刚在当前曲后插了推荐曲（当前曲非推荐），先播这首推荐曲
+            if let Some(cur) = self.queue.current
+                && !self.queue.items[cur].recommended
+                && self
+                    .queue
+                    .items
+                    .get(cur + 1)
+                    .is_some_and(|next| next.recommended)
+            {
+                return Some(cur + 1);
+            }
             let cur = self.queue.current;
             let mut rng = queue::simple_rng();
             loop {

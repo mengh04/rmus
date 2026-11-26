@@ -67,6 +67,7 @@ fn item_for(path: &Path) -> QueueItem {
         artist,
         album,
         duration_ms,
+        recommended: false,
     }
 }
 

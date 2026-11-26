@@ -209,6 +209,7 @@ impl App {
     pub fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
         match self.mode {
             Mode::Input(_) => self.handle_input_key(key),
+            Mode::ConfirmDelete { .. } => self.handle_confirm_delete_key(key),
             Mode::Search => self.handle_search_key(key),
             Mode::Command => self.handle_palette_key(key),
             Mode::Picker => self.handle_picker_key(key),
@@ -410,7 +411,7 @@ impl App {
             }
             // 下载进度/done 事件仍会广播；在线 tab 画布只消费
             // rmus-dl 自己的 PluginView，这里直接忽略
-            Feed::Daemon(Event::Plugin { .. }) => {}
+            Feed::Daemon(Event::Plugin { .. } | Event::TrackFinished { .. }) => {}
             // 播放错误：解码失败/整队列都播不了（daemon 的 stderr 可能是
             // /dev/null，只能靠事件告诉用户）
             Feed::Daemon(Event::Error { message }) => self.notify(message, true),
@@ -514,6 +515,35 @@ impl App {
                     self.tab = Tab::Queue;
                 }
             }
+        }
+    }
+
+    /// 永久删文件确认态：y / Y 执行删盘并拉黑，其余任意键取消。
+    fn handle_confirm_delete_key(&mut self, key: crossterm::event::KeyEvent) {
+        let Mode::ConfirmDelete { path, label } = std::mem::replace(&mut self.mode, Mode::Normal)
+        else {
+            return;
+        };
+        let confirmed = matches!(
+            (key.modifiers, key.code),
+            (
+                KeyModifiers::NONE | KeyModifiers::SHIFT,
+                KeyCode::Char('y' | 'Y')
+            )
+        );
+        if !confirmed {
+            self.notify("已取消删除", false);
+            return;
+        }
+        match self.daemon.request(Request::DeleteFile { path: Some(path) }) {
+            Ok(_) => {
+                self.notify(format!("已永久删除并拉黑：{label}"), false);
+                self.need_queue = true;
+                self.need_library = true;
+                self.need_playlists = true;
+                self.need_status = true;
+            }
+            Err(e) => self.notify(format!("{e}"), true),
         }
     }
 

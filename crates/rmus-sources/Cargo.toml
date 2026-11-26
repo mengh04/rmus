@@ -1,0 +1,15 @@
+[package]
+name = "rmus-sources"
+version = "0.1.0"
+edition = "2024"
+description = "rmus 共享音乐源库：酷我/酷狗搜索、下载管线、tag 写入"
+license = "MIT"
+publish = false
+
+[dependencies]
+rmus-plugin-sdk = { path = "../plugin-sdk", features = ["lofty-io"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+anyhow = "1"
+lofty = "0.25"

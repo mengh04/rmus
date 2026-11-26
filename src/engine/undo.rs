@@ -69,6 +69,34 @@ impl Engine {
         Ok(())
     }
 
+    /// 从撤销/重做历史中彻底抹去某个已删盘的路径，避免 `u` 复活幽灵曲目。
+    pub(super) fn purge_history_path(&mut self, target: &std::path::Path) {
+        let strip = |snap: &mut Snapshot| {
+            let mut i = 0;
+            while i < snap.items.len() {
+                if snap.items[i].path == target {
+                    snap.items.remove(i);
+                    match snap.current {
+                        Some(c) if c == i => snap.current = None,
+                        Some(c) if c > i => snap.current = Some(c - 1),
+                        _ => {}
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            if snap.current.is_none() && !snap.items.is_empty() {
+                snap.current = Some(0);
+            }
+        };
+        for snap in &mut self.undo {
+            strip(snap);
+        }
+        for snap in &mut self.redo {
+            strip(snap);
+        }
+    }
+
     fn take_snapshot(&self) -> Snapshot {
         Snapshot {
             items: self.queue.items.clone(),

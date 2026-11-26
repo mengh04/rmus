@@ -29,6 +29,10 @@ pub enum RepeatMode {
     One,
 }
 
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
 /// 队列中一曲的对外展示信息。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackInfo {
@@ -38,6 +42,9 @@ pub struct TrackInfo {
     pub artist: String,
     pub album: String,
     pub duration_ms: u64,
+    /// 自动推荐插入的曲目（TUI / CLI 标注 `✦`）
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub recommended: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -54,6 +61,9 @@ pub struct StatusInfo {
     pub track: Option<TrackInfo>,
     pub repeat: RepeatMode,
     pub random: bool,
+    /// 自动推荐开关：播着播着自动插歌（队尾续播 + 播中穿插）
+    #[serde(default)]
+    pub auto_recommend: bool,
     /// 当前队列的**来源**播放列表名；None = 匿名队列
     pub queue_name: Option<String>,
     /// 队列内容已偏离它的来源列表（顶栏打 `*`）。任何队列改动都不会回写列表，
@@ -97,6 +107,8 @@ pub enum Request {    /// 查询状态快照
     Status,
     /// 添加文件/目录到队列尾部（目录递归扫描）。由 daemon 层完成扫描后转发给引擎。
     Add { paths: Vec<PathBuf> },
+    /// 插入文件/目录到当前曲之后（不打断当前播放）。由 daemon 层完成扫描后转发给引擎。
+    InsertNext { paths: Vec<PathBuf> },
     /// 替换整个队列为这些文件/目录并从头播放（"只播放这些"）
     Open { paths: Vec<PathBuf> },
     /// 试听：保存当前播放状态（队列/曲目/进度/模式），临时换成这些文件
@@ -124,6 +136,9 @@ pub enum Request {    /// 查询状态快照
     Remove { index: Option<usize> },
     /// 删除队列中 [start, end) 范围的曲子（dd / dj / dk / dG / dgg）
     RemoveRange { start: usize, end: usize },
+    /// 永久删除音乐库原文件并加入推荐拉黑名单；None = 删除正在播放的曲子。
+    /// 由 daemon 层联动引擎停播/清队列/清歌单/清库并删盘。
+    DeleteFile { path: Option<PathBuf> },
     /// 撤销上一次队列改动（增删 / 排序 / 清空 / 打乱）
     Undo,
     /// 重做被撤销的队列改动
@@ -156,6 +171,8 @@ pub enum Request {    /// 查询状态快照
     SetRepeat { mode: Option<RepeatMode> },
     /// 随机播放开关
     SetRandom { on: Option<bool> },
+    /// 自动推荐开关：None = 切换
+    SetAutoRecommend { on: Option<bool> },
     /// 库模糊搜索：按相关度返回候选（daemon 层查索引）
     Find { query: String },
     /// 库模糊播放：最佳匹配插到当前曲后立即播（空队列则直接播）。
@@ -218,6 +235,12 @@ pub enum Reply {
     Matches { tracks: Vec<TrackInfo> },
     /// 插件调用的原样结果（透明透传，不做包装）
     Plugin(serde_json::Value),
+    /// 永久删除文件成功
+    Deleted {
+        path: PathBuf,
+        title: String,
+        artist: String,
+    },
     Ok,
 }
 
@@ -231,7 +254,12 @@ pub enum Event {
     Position { position_ms: u64 },
     QueueChanged,
     VolumeChanged { value: f32 },
-    ModeChanged { repeat: RepeatMode, random: bool },
+    ModeChanged {
+        repeat: RepeatMode,
+        random: bool,
+        #[serde(default)]
+        auto_recommend: bool,
+    },
     /// 插件推送（进度等）与长任务完成通知的统一出口。
     /// `data` 的形状由插件自定：进度类形如 `{"received":N,"total":M}`，
     /// 宿主包装的任务完结为 `{"event":"done","result":{...}}` 或
@@ -257,6 +285,15 @@ pub enum Event {
     /// 客户端负责告诉用户发生了什么（daemon 自身的 stderr 可能是 /dev/null）。
     Error {
         message: String,
+    },
+    /// 一首歌结束播放（自然播完、切歌或停止；不含 seek），供本地听歌行为画像统计完播/秒切。
+    TrackFinished {
+        path: PathBuf,
+        title: String,
+        artist: String,
+        played_ms: u64,
+        duration_ms: u64,
+        eof: bool,
     },
 }
 
@@ -324,7 +361,11 @@ mod tests {
             Event::SongChanged { index: Some(3) },
             Event::StateChanged { state: PlayState::Playing },
             Event::VolumeChanged { value: 0.5 },
-            Event::ModeChanged { repeat: RepeatMode::All, random: true },
+            Event::ModeChanged {
+                repeat: RepeatMode::All,
+                random: true,
+                auto_recommend: true,
+            },
             Event::Plugin {
                 plugin: "dl".into(),
                 call: Some(3),

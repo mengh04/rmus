@@ -130,6 +130,18 @@ fn right_line(app: &App, theme: &Theme, width: u16) -> Line<'static> {
             },
         ));
         spans.push(Span::raw("   "));
+        if width >= 82 {
+            spans.push(Span::styled("推荐 ", theme.style_faint()));
+            spans.push(Span::styled(
+                if status.auto_recommend { "开" } else { "关" }.to_owned(),
+                if status.auto_recommend {
+                    theme.style_accent()
+                } else {
+                    theme.style_text()
+                },
+            ));
+            spans.push(Span::raw("   "));
+        }
     }
     if width >= 34 {
         let volume = (status.volume.clamp(0.0, 1.0) * 100.0).round() as u32;

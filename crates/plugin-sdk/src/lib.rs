@@ -1,429 +1,293 @@
-//! rmus wasm 插件 SDK：插件与宿主之间 ABI 的插件侧封装。
+//! rmus 原生插件 SDK 与线程本地运行时上下文。
 //!
-//! 架构取向学 Zellij：插件是 wasm32 core module，宿主（rmusd）用解释器
-//! 跑实例并**提供全部宿主函数**——插件不直接链接 WASI，能力（渲染输出、
-//! 方法回包、通知、取消查询、网络、文件、时钟）一律经宿主代理，便于做
-//! 权限白名单。
-//!
-//! host functions 只在 `wasm32` target 真实链接；native target 下是
-//! no-op stub——插件 crate 因此能在主机上直接 `cargo test` / 类型检查，
-//! 不需要 wasm 工具链（API 调用在 native 下什么都不做）。
-//!
-//! # 插件 ABI（v2）
-//!
-//! 插件导出（按 manifest 类型）：
-//!
-//! ```text
-//! load() -> ()                     实例化后调用一次，初始化状态
-//! update(event: i32) -> i32        UI 插件：宿主推事件；非 0 = 需要重绘
-//! render(rows: i32, cols: i32)     UI 插件：宿主在重绘前调用
-//! alloc(len: i32) -> ptr           方法插件：宿主请求一块参数缓冲
-//! call(ptr: i32, len: i32) -> i32  方法插件：执行请求行 {"method","params"}，
-//!                                  回包经 rmus.reply 送出；返回非 0 = 异常失败
-//! manifest_ptr() / manifest_len()  manifest 静态字符串
-//! ```
-//!
-//! 方法回包是 `{"result":...}` 或 `{"error":"..."}`——形状与进程外插件的
-//! NDJSON 协议一致（只是传输介质从 stdio 换成共享内存 + 宿主函数）。
-//!
-//! 单线程 + 同步模型（Zellij 同款假设）：插件内不需要任何并发原语的
-//! 正确性保证，事件顺序由宿主保证。`alloc` 复用同一份缓冲也依赖这个
-//! 假设。
+//! 所有插件 crate（`rmus-dl` / `rmus-podcast` / `rmus-fm` / `rmus-dj`）直接
+//! 静态链接进 `rmusd`，不再经 wasm32 / wasmi 解释执行：
+//! - HTTP 直走 `ureq`（带代理与 cookie 支持）
+//! - 文件 IO 直走 `std::fs::File`
+//! - 渲染输出、daemon RPC、后台任务与取消标记挂在每个插件线程 / worker 线程的
+//!   thread-local [`runtime::HostContext`] 上，保留单线程顺序事件模型，零 unsafe。
 
-/// 宿主函数的原始导入（wasm）/ no-op stub（native）。
-mod host {
-    #[cfg(target_arch = "wasm32")]
-    #[link(wasm_import_module = "rmus")]
-    #[allow(dead_code)] // 未用导入无害：能力面全集声明，按插件需求取用
-    unsafe extern "C" {
-        #[link_name = "print_line"]
-        pub fn rmus_print_line(ptr: *const u8, len: u32);
-        #[link_name = "print_spans"]
-        pub fn rmus_print_spans(ptr: *const u8, len: u32);
-        #[link_name = "set_selected"]
-        pub fn rmus_set_selected(idx: i32);
-        #[link_name = "set_list"]
-        pub fn rmus_set_list(total: i32, index: i32);
-        #[link_name = "notify"]
-        pub fn rmus_notify(ptr: *const u8, len: u32);
-        #[link_name = "cancelled"]
-        pub fn rmus_cancelled() -> i32;
-        #[link_name = "reply"]
-        pub fn rmus_reply(ptr: *const u8, len: u32);
-        #[link_name = "sleep_ms"]
-        pub fn rmus_sleep_ms(ms: u32);
-        #[link_name = "log"]
-        pub fn rmus_log(ptr: *const u8, len: u32);
-        #[link_name = "spawn_task"]
-        pub fn rmus_spawn_task(ptr: *const u8, len: u32) -> i32;
-        #[link_name = "last_event"]
-        pub fn rmus_last_event(out: *mut u8, cap: u32) -> i32;
-        #[link_name = "cancel_task"]
-        pub fn rmus_cancel_task(task_id: i64) -> i32;        #[link_name = "now_ms"]
-        pub fn rmus_now_ms() -> i64;
-        #[link_name = "library_dir"]
-        pub fn rmus_library_dir(out: *mut u8, cap: u32) -> i32;
-        // daemon RPC（白名单直通引擎：Status / Peek / Back）
-        #[link_name = "daemon"]
-        pub fn rmus_daemon(ptr: *const u8, len: u32) -> i32;
-        #[link_name = "daemon_read"]
-        pub fn rmus_daemon_read(out: *mut u8, cap: u32) -> i32;
-        #[link_name = "data_dir"]
-        pub fn rmus_data_dir(out: *mut u8, cap: u32) -> i32;
-        // 网络
-        #[link_name = "http_open"]
-        pub fn rmus_http_open(ptr: *const u8, len: u32) -> i32;
-        #[link_name = "http_status"]
-        pub fn rmus_http_status(h: i32) -> i32;
-        #[link_name = "http_url"]
-        pub fn rmus_http_url(h: i32, out: *mut u8, cap: u32) -> i32;
-        #[link_name = "http_header"]
-        pub fn rmus_http_header(h: i32, name: *const u8, nl: u32, out: *mut u8, cap: u32) -> i32;
-        #[link_name = "http_read"]
-        pub fn rmus_http_read(h: i32, out: *mut u8, cap: u32) -> i32;
-        #[link_name = "http_close"]
-        pub fn rmus_http_close(h: i32);
-        // 文件
-        #[link_name = "file_open"]
-        pub fn rmus_file_open(ptr: *const u8, len: u32, mode: i32) -> i32;
-        #[link_name = "file_read"]
-        pub fn rmus_file_read(h: i32, out: *mut u8, cap: u32) -> i32;
-        #[link_name = "file_write"]
-        pub fn rmus_file_write(h: i32, ptr: *const u8, len: u32) -> i32;
-        #[link_name = "file_seek"]
-        pub fn rmus_file_seek(h: i32, off: i64, whence: i32) -> i64;
-        #[link_name = "file_truncate"]
-        pub fn rmus_file_truncate(h: i32, len: i64) -> i32;
-        #[link_name = "file_len"]
-        pub fn rmus_file_len(h: i32) -> i64;
-        #[link_name = "file_close"]
-        pub fn rmus_file_close(h: i32);
-        #[link_name = "fs_exists"]
-        pub fn rmus_fs_exists(ptr: *const u8, len: u32) -> i32;
-        #[link_name = "fs_remove"]
-        pub fn rmus_fs_remove(ptr: *const u8, len: u32) -> i32;
-        #[link_name = "fs_rename"]
-        pub fn rmus_fs_rename(fp: *const u8, fl: u32, tp: *const u8, tl: u32) -> i32;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::{Arc, LazyLock, Mutex};
+
+/// 原生插件的运行时支撑（供 `rmusd` 宿主与测试安装线程上下文）。
+pub mod runtime {
+    use super::*;
+
+    /// 渲染行的一个带样式片段。
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct RenderSpan {
+        pub text: String,
+        pub style: String,
     }
 
-    /// wasm32 下导入在 host 根（extern 块本身），直接可见；
-    /// native 下统一走 native stub。
-    #[cfg(not(target_arch = "wasm32"))]
-    pub use native::*;
+    /// 渲染行（`render()` 的输出单位）。
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct RenderLine {
+        pub spans: Vec<RenderSpan>,
+    }
 
-    /// native stub：签名与 wasm 导入一一对应。**标成 unsafe fn**——调用处
-    /// 的 unsafe 块在两个 target 下都合法（native 下其实安全，仅为对齐）。
-    #[cfg(not(target_arch = "wasm32"))]
-    mod native {
-        #![allow(dead_code)] // native 下只是 stub，保证插件 crate 能原生编译/测试
-        pub unsafe fn rmus_print_line(_ptr: *const u8, _len: u32) {}
-        pub unsafe fn rmus_print_spans(_ptr: *const u8, _len: u32) {}
-        pub unsafe fn rmus_set_selected(_idx: i32) {}
-        pub unsafe fn rmus_set_list(_total: i32, _index: i32) {}
-        pub unsafe fn rmus_notify(_ptr: *const u8, _len: u32) {}
-        pub unsafe fn rmus_cancelled() -> i32 {
-            0
+    /// 一帧 `render()` 收集到的完整结果。
+    #[derive(Debug, Default)]
+    pub struct FrameOutput {
+        pub lines: Vec<RenderLine>,
+        pub selected: Option<usize>,
+        pub list: Option<(usize, usize)>,
+    }
+
+    /// 跨线程取消句柄：标记某个 call_id / worker 已被取消。
+    #[derive(Clone, Default)]
+    pub struct CancelHandle(pub(crate) Arc<Mutex<HashSet<u64>>>);
+
+    impl CancelHandle {
+        pub fn new() -> Self {
+            Self::default()
         }
-        pub unsafe fn rmus_reply(_ptr: *const u8, _len: u32) {}
-        pub unsafe fn rmus_sleep_ms(_ms: u32) {}
-        pub unsafe fn rmus_spawn_task(_ptr: *const u8, _len: u32) -> i32 {
-            0
+
+        pub fn cancel(&self, call: u64) {
+            self.0.lock().unwrap().insert(call);
         }
-        pub unsafe fn rmus_last_event(_out: *mut u8, _cap: u32) -> i32 {
-            -1
+
+        pub(crate) fn is_cancelled(&self, current_call: Option<u64>, worker_cancel: bool) -> bool {
+            let set = self.0.lock().unwrap();
+            match current_call {
+                Some(id) => set.contains(&id),
+                None => worker_cancel && !set.is_empty(),
+            }
         }
-        pub unsafe fn rmus_cancel_task(_task_id: i64) -> i32 {
-            0
-        }
-        pub unsafe fn rmus_now_ms() -> i64 {
-            0
-        }
-        pub unsafe fn rmus_library_dir(_out: *mut u8, _cap: u32) -> i32 {
-            -1
-        }
-        pub unsafe fn rmus_daemon(_ptr: *const u8, _len: u32) -> i32 {
-            -1
-        }
-        pub unsafe fn rmus_daemon_read(_out: *mut u8, _cap: u32) -> i32 {
-            -1
-        }
-        pub unsafe fn rmus_data_dir(_out: *mut u8, _cap: u32) -> i32 {
-            -1
-        }
-        pub unsafe fn rmus_http_open(_ptr: *const u8, _len: u32) -> i32 {
-            -1
-        }
-        pub unsafe fn rmus_http_status(_h: i32) -> i32 {
-            -1
-        }
-        pub unsafe fn rmus_http_url(_h: i32, _out: *mut u8, _cap: u32) -> i32 {
-            -1
-        }
-        pub unsafe fn rmus_http_header(
-            _h: i32,
-            _n: *const u8,
-            _nl: u32,
-            _out: *mut u8,
-            _cap: u32,
-        ) -> i32 {
-            -1
-        }
-        pub unsafe fn rmus_http_read(_h: i32, _out: *mut u8, _cap: u32) -> i32 {
-            -1
-        }
-        pub unsafe fn rmus_http_close(_h: i32) {}
-        pub unsafe fn rmus_file_open(_ptr: *const u8, _len: u32, _mode: i32) -> i32 {
-            -1
-        }
-        pub unsafe fn rmus_file_read(_h: i32, _out: *mut u8, _cap: u32) -> i32 {
-            -1
-        }
-        pub unsafe fn rmus_file_write(_h: i32, _ptr: *const u8, _len: u32) -> i32 {
-            -1
-        }
-        pub unsafe fn rmus_file_seek(_h: i32, _off: i64, _whence: i32) -> i64 {
-            -1
-        }
-        pub unsafe fn rmus_file_truncate(_h: i32, _len: i64) -> i32 {
-            0
-        }
-        pub unsafe fn rmus_file_len(_h: i32) -> i64 {
-            -1
-        }
-        pub unsafe fn rmus_file_close(_h: i32) {}
-        pub unsafe fn rmus_fs_exists(_ptr: *const u8, _len: u32) -> i32 {
-            0
-        }
-        pub unsafe fn rmus_fs_remove(_ptr: *const u8, _len: u32) -> i32 {
-            0
-        }
-        pub unsafe fn rmus_fs_rename(_fp: *const u8, _fl: u32, _tp: *const u8, _tl: u32) -> i32 {
-            0
-        }
+    }
+
+    pub type NotifyFn = Arc<dyn Fn(Option<u64>, serde_json::Value) + Send + Sync>;
+    pub type DaemonFn = Arc<dyn Fn(serde_json::Value) -> Result<serde_json::Value, String> + Send + Sync>;
+    pub type SpawnTaskFn = Arc<dyn Fn(u64, String, serde_json::Value) -> bool + Send + Sync>;
+
+    /// 原生插件描述符：每个内建插件 crate 导出 `pub fn plugin() -> NativePlugin`。
+    #[derive(Clone, Copy)]
+    pub struct NativePlugin {
+        /// 与 `rmus::plugin::PluginManifest` 同形的静态 JSON 字符串。
+        pub manifest: &'static str,
+        /// UI 插件事件回调；返回非 0 表示需要重绘。
+        pub update: Option<fn(i32) -> i32>,
+        /// UI 插件渲染回调。
+        pub render: Option<fn(i32, i32)>,
+        /// 方法/任务入口。
+        pub handle: fn(&str, &serde_json::Value) -> Result<serde_json::Value, String>,
+    }
+
+    /// 当前插件线程或 worker 线程的宿主上下文。
+    #[derive(Default)]
+    pub struct HostContext {
+        pub lib_dir: PathBuf,
+        pub data_dir: PathBuf,
+        pub current_call: Option<u64>,
+        pub cancelled: CancelHandle,
+        pub worker_cancel: bool,
+        pub on_notify: Option<NotifyFn>,
+        pub daemon_call: Option<DaemonFn>,
+        pub spawn_task: Option<SpawnTaskFn>,
+        pub worker_cancels: Arc<Mutex<HashMap<u64, CancelHandle>>>,
+        pub last_event: Option<serde_json::Value>,
+        pub frame: FrameOutput,
+    }
+
+    thread_local! {
+        pub(crate) static CTX: RefCell<Option<HostContext>> = const { RefCell::new(None) };
+    }
+
+    /// 在当前线程安装上下文（插件会话线程 / worker 线程启动时调用）。
+    pub fn install_context(ctx: HostContext) {
+        CTX.with(|cell| {
+            *cell.borrow_mut() = Some(ctx);
+        });
+    }
+
+    /// 清除当前线程上下文（测试收尾 / 线程退出）。
+    pub fn clear_context() {
+        CTX.with(|cell| {
+            *cell.borrow_mut() = None;
+        });
+    }
+
+    /// 更新当前方法调用编号（供 `notify` 与 `cancelled()` 使用）。
+    pub fn set_current_call(call: Option<u64>) {
+        CTX.with(|cell| {
+            if let Some(ctx) = cell.borrow_mut().as_mut() {
+                ctx.current_call = call;
+            }
+        });
+    }
+
+    /// 写入最近一条事件（`KIND_DATA` 前调用，`task::last_event()` 读取）。
+    pub fn set_last_event(event: serde_json::Value) {
+        CTX.with(|cell| {
+            if let Some(ctx) = cell.borrow_mut().as_mut() {
+                ctx.last_event = Some(event);
+            }
+        });
+    }
+
+    /// 清空上一帧渲染缓冲（每次 `render()` 前调用）。
+    pub fn begin_render() {
+        CTX.with(|cell| {
+            if let Some(ctx) = cell.borrow_mut().as_mut() {
+                ctx.frame = FrameOutput::default();
+            }
+        });
+    }
+
+    /// 取出本帧渲染结果（每次 `render()` 后调用）。
+    pub fn take_render() -> FrameOutput {
+        CTX.with(|cell| {
+            cell.borrow_mut()
+                .as_mut()
+                .map(|ctx| std::mem::take(&mut ctx.frame))
+                .unwrap_or_default()
+        })
     }
 }
 
-/// 输出一行渲染内容。UTF-8、不含换行；宿主按调用次数分行收集，
-/// 在每次 `render()` 开始时清空上一轮的输出。
+pub use runtime::{HostContext, NativePlugin};
+
+/// 输出一行纯文本渲染内容（单段正文色）。
 pub fn print_line(text: &str) {
-    #[cfg(target_arch = "wasm32")]
-    unsafe {
-        host::rmus_print_line(text.as_ptr(), text.len() as u32);
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let _ = text; // native 下 no-op（单元测试/类型检查用）
-    }
+    ui::print(text);
 }
 
-/// 方法执行期间发通知（如下载进度）。宿主实时转发给所有客户端。
+/// 方法执行期间发通知（如下载进度）。宿主实时转发给所有客户端或回注 UI 线程。
 pub fn notify(data: &serde_json::Value) {
-    let line = serde_json::json!({"event": "progress", "data": data});
-    let bytes = match serde_json::to_vec(&line) {
-        Ok(b) => b,
-        Err(_) => return,
-    };
-    #[cfg(target_arch = "wasm32")]
-    unsafe {
-        host::rmus_notify(bytes.as_ptr(), bytes.len() as u32);
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let _ = bytes;
+    let callback = runtime::CTX.with(|cell| {
+        let borrow = cell.borrow();
+        let ctx = borrow.as_ref()?;
+        Some((ctx.on_notify.clone()?, ctx.current_call))
+    });
+    if let Some((cb, call)) = callback {
+        cb(call, data.clone());
     }
 }
 
 /// 当前方法调用是否已被取消（长任务循环里轮询；取消后应尽快回 error）。
 pub fn cancelled() -> bool {
-    #[cfg(target_arch = "wasm32")]
-    unsafe {
-        host::rmus_cancelled() != 0
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        false
-    }
-}
-
-/// 睡眠。wasm32-unknown-unknown 没有 std 时钟实现，经宿主代理阻塞
-/// 插件线程（同步模型下等价于 std::thread::sleep）。
-pub fn sleep(ms: u64) {
-    let ms = ms.min(u32::MAX as u64) as u32;
-    #[cfg(target_arch = "wasm32")]
-    unsafe {
-        host::rmus_sleep_ms(ms);
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let _ = ms;
-    }
-}
-
-/// 后台任务：把长任务（下载/搜索）丢给宿主的 worker 实例跑，UI 线程
-/// 保持响应。worker 的进度/完成以 `KIND_DATA` 事件注入，用
-/// [`last_event`] 取数据。
-pub mod task {
-    use super::host;
-
-    /// 发起后台任务：宿主用同一个 wasm 的**新实例**执行
-    /// `call_method(method, params)`，任务事件（进度/done/failed）以
-    /// `KIND_DATA` 事件回注当前插件实例。返回 false = 宿主拒绝。
-    pub fn spawn(task_id: u64, method: &str, params: &serde_json::Value) -> bool {
-        let spec = serde_json::json!({
-            "task_id": task_id,
-            "method": method,
-            "params": params,
+    runtime::CTX.with(|cell| {
+        cell.borrow().as_ref().is_some_and(|ctx| {
+            ctx.cancelled
+                .is_cancelled(ctx.current_call, ctx.worker_cancel)
         })
-        .to_string();
-        #[cfg(target_arch = "wasm32")]
-        unsafe {
-            host::rmus_spawn_task(spec.as_ptr(), spec.len() as u32) != 0
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let _ = spec;
-            false
+    })
+}
+
+/// 阻塞当前插件/worker 线程指定毫秒数。
+pub fn sleep(ms: u64) {
+    if ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+}
+
+/// 后台任务：把长任务（下载/搜索/常驻 worker）丢给独立线程跑，UI 线程保持响应。
+/// worker 的进度/完成以 `KIND_DATA` 事件注入，用 [`last_event`] 取数据。
+pub mod task {
+    use super::runtime;
+
+    /// 发起后台任务：宿主在新线程执行本插件的 `handle(method, params)`，
+    /// 任务事件（progress / done / failed）以 `KIND_DATA` 回注插件 UI 线程。
+    pub fn spawn(task_id: u64, method: &str, params: &serde_json::Value) -> bool {
+        let spawner = runtime::CTX.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|ctx| ctx.spawn_task.clone())
+        });
+        match spawner {
+            Some(f) => f(task_id, method.to_string(), params.clone()),
+            None => false,
         }
     }
 
-    /// 取消后台任务（worker 循环自查生效）。
+    /// 取消后台任务（worker 循环自查 `cancelled()` 生效）。
     pub fn cancel(task_id: u64) -> bool {
-        #[cfg(target_arch = "wasm32")]
-        unsafe {
-            host::rmus_cancel_task(task_id as i64) != 0
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let _ = task_id;
+        let cancels = runtime::CTX.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .map(|ctx| ctx.worker_cancels.clone())
+        });
+        let Some(cancels) = cancels else {
+            return false;
+        };
+        let guard = cancels.lock().unwrap();
+        if let Some(handle) = guard.get(&task_id) {
+            handle.cancel(task_id);
+            true
+        } else {
             false
         }
     }
 
-    /// 取最近一条后台任务事件：`{"task_id":N,"event":"progress|done|failed",
-    /// "data":...}`。仅在 `KIND_DATA` 事件的 update 调用内有效。
+    /// 取最近一条后台任务/daemon 事件。仅在 `KIND_DATA` 事件的 update 调用内有效。
     pub fn last_event() -> Option<serde_json::Value> {
-        // 宿主返回完整长度、写入按 cap 截断——截断则扩容重读
-        // （read 可重复调用，内容保持到下一次 set_last_event 覆盖）
-        let mut cap = 64 * 1024;
-        loop {
-            let mut buf = vec![0u8; cap];
-            let n = unsafe { host::rmus_last_event(buf.as_mut_ptr(), buf.len() as u32) };
-            if n < 0 {
-                return None;
-            }
-            if (n as usize) <= cap {
-                buf.truncate(n as usize);
-                return serde_json::from_slice(&buf).ok();
-            }
-            cap = n as usize + 64;
-        }
+        runtime::CTX.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|ctx| ctx.last_event.clone())
+        })
     }
 }
 
-/// 插件调试日志（经宿主 stderr 写出；wasm32 没有 stderr，eprintln 无效）。
+/// 插件调试日志（直接写到 daemon stderr）。
 pub fn debug_log(text: &str) {
-    #[cfg(target_arch = "wasm32")]
-    unsafe {
-        host::rmus_log(text.as_ptr(), text.len() as u32);
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        eprintln!("[插件] {text}");
-    }
+    eprintln!("[rmusd] 插件日志: {text}");
 }
 
-/// 发送方法回包（`declare_plugin_manifest!` 生成的 `call` export 内部用）。
-#[doc(hidden)]
-pub fn send_reply(line: &[u8]) {
-    #[cfg(target_arch = "wasm32")]
-    unsafe {
-        host::rmus_reply(line.as_ptr(), line.len() as u32);
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let _ = line;
-    }
-}
-
-/// 墙钟毫秒（进度节流、临时文件名）。
+/// 墙钟毫秒（进度节流、临时文件名、排班）。
 pub fn now_ms() -> u64 {
-    // native 下用真实时间（stub 形同虚设，方便单测）
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0)
-    }
-    #[cfg(target_arch = "wasm32")]
-    unsafe {
-        host::rmus_now_ms().max(0) as u64
-    }
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// 下载产物根目录（rmusd 的音乐库根目录）。
 pub fn library_dir() -> String {
-    read_into_host(|out, cap| unsafe { host::rmus_library_dir(out, cap) }).unwrap_or_default()
+    runtime::CTX.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|ctx| ctx.lib_dir.display().to_string())
+            .unwrap_or_default()
+    })
 }
 
-/// daemon 数据根目录（`~/.local/share/rmus`）。播客等插件数据的落点；
+/// daemon 数据根目录（`~/.local/share/rmus`）。播客/DJ/FM 等插件数据的落点；
 /// 放这里而不是 `library_dir`——库根下的音频文件会被音乐库扫描收编。
 pub fn data_dir() -> String {
-    read_into_host(|out, cap| unsafe { host::rmus_data_dir(out, cap) }).unwrap_or_default()
+    runtime::CTX.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|ctx| ctx.data_dir.display().to_string())
+            .unwrap_or_default()
+    })
 }
 
-/// daemon RPC（宿主代理，白名单直通引擎）。
-///
-/// 白名单 v2：`Status`（进度采样）/ `Peek`（试听态播放，播客点播与连播
-/// 都靠它）/ `Back`（结束试听）/ `QueueList`（队列）/ `PlaylistsList`
-/// （播放列表名）/ `Find`（库模糊搜索，限 10 条）/ `LibList`（整库列
-/// 表，画像用）/ `Add`（加到队列尾）/ `PlaylistAdd`（加到播放列表，不
-/// 存在则创建）。其余请求宿主侧一律拒绝。
+/// daemon RPC（直通引擎/曲库，白名单校验在宿主侧）。
 pub mod daemon {
-    use super::host;
+    use super::runtime;
 
-    /// 发起 RPC。`request` 是协议 Request 的 tagged JSON
-    /// （`{"method":..,"params":..}`），返回 Reply 的 JSON（untagged 形态）；
-    /// Err = daemon 侧错误信息。
+    /// 发起 RPC。`request` 是协议 Request 的 tagged JSON，返回 Reply 的 JSON。
     pub fn call(request: serde_json::Value) -> Result<serde_json::Value, String> {
-        let text = serde_json::to_string(&request).map_err(|e| e.to_string())?;
-        let rc = unsafe { host::rmus_daemon(text.as_ptr(), text.len() as u32) };
-        if rc != 0 {
-            return Err("daemon RPC 宿主不可用".into());
-        }
-        // 响应读取：daemon_read 返回完整长度、写入按 cap 截断——
-        // 截断则按完整长度扩容重读（read 可重复调用，直到下次 daemon 覆盖）
-        let mut cap = 4096usize;
-        loop {
-            let mut buf = vec![0u8; cap];
-            let n = unsafe { host::rmus_daemon_read(buf.as_mut_ptr(), buf.len() as u32) };
-            if n < 0 {
-                return Err("daemon RPC 响应读取失败".into());
-            }
-            if (n as usize) <= cap {
-                buf.truncate(n as usize);
-                let line: serde_json::Value =
-                    serde_json::from_slice(&buf).map_err(|e| e.to_string())?;
-                return match line.get("ok").and_then(|v| v.as_bool()) {
-                    Some(true) => Ok(line.get("reply").cloned().unwrap_or(serde_json::Value::Null)),
-                    _ => Err(line
-                        .get("error")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("未知错误")
-                        .to_string()),
-                };
-            }
-            cap = n as usize + 64;
-        }
+        let f = runtime::CTX
+            .with(|cell| {
+                cell.borrow()
+                    .as_ref()
+                    .and_then(|ctx| ctx.daemon_call.clone())
+            })
+            .ok_or_else(|| "daemon RPC 宿主不可用".to_string())?;
+        f(request)
     }
 
-    /// 当前播放状态快照（Reply::Status：state/position_ms/duration_ms/track…）。
+    /// 当前播放状态快照（Reply::Status）。
     pub fn status() -> Result<serde_json::Value, String> {
         call(serde_json::json!({ "method": "status" }))
     }
 
-    /// 试听态播放这些文件（存档当前队列，播完自动恢复）。已在试听态时
-    /// 只换临时队列、原存档不动——播客连播的无缝切集就靠这个语义。
+    /// 试听态播放这些文件（存档当前队列，播完自动恢复）。
     pub fn peek(paths: Vec<String>) -> Result<serde_json::Value, String> {
         call(serde_json::json!({ "method": "peek", "params": { "paths": paths } }))
     }
@@ -448,7 +312,7 @@ pub mod daemon {
         call(serde_json::json!({ "method": "find", "params": { "query": query } }))
     }
 
-    /// 整库列表（`{"tracks":[TrackInfo…]}`；推荐插件建口味画像用）。
+    /// 整库列表（`{"tracks":[TrackInfo…]}`；推荐建口味画像用）。
     pub fn lib_list() -> Result<serde_json::Value, String> {
         call(serde_json::json!({ "method": "lib_list" }))
     }
@@ -464,28 +328,24 @@ pub mod daemon {
     }
 }
 
-/// 宿主把字符串写进插件缓冲的通用封装（4KB 上限，够 URL/header/路径用）。
-fn read_into_host(f: impl FnOnce(*mut u8, u32) -> i32) -> Option<String> {
-    let mut buf = vec![0u8; 4096];
-    let n = f(buf.as_mut_ptr(), buf.len() as u32);
-    if n < 0 {
-        return None;
-    }
-    buf.truncate(n as usize);
-    String::from_utf8(buf).ok()
-}
+/// 进程级共享 HTTP 客户端（自动读取系统代理 / socks 代理，统一 UA）。
+static HTTP_AGENT: LazyLock<ureq::Agent> = LazyLock::new(|| {
+    ureq::AgentBuilder::new()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36")
+        .build()
+});
 
-/// HTTP 客户端（宿主代理；非 2xx 也返回 Response，状态码由插件判定）。
+/// 原生 HTTP 客户端（直连 `ureq`；非 2xx 也返回 Response，状态码由调用方判定）。
 pub mod http {
-    use super::host;
+    use super::HTTP_AGENT;
+    use std::cell::RefCell;
+    use std::io::{BufRead, BufReader};
 
     /// 一个请求的描述。
     pub struct Request {
         pub url: String,
         pub method: String,
-        /// header 名小写化由宿主负责
         pub headers: Vec<(String, String)>,
-        /// 文本 body（form / JSON；二进制上传暂无需求）
         pub body: Option<String>,
     }
 
@@ -515,61 +375,72 @@ pub mod http {
             self.headers.push((name.to_string(), value.to_string()));
             self
         }
-
-        fn to_json(&self) -> Vec<u8> {
-            let mut headers = serde_json::Map::new();
-            for (k, v) in &self.headers {
-                headers.insert(k.clone(), serde_json::json!(v));
-            }
-            serde_json::json!({
-                "url": self.url,
-                "method": self.method,
-                "headers": headers,
-                "body": self.body,
-            })
-            .to_string()
-            .into_bytes()
-        }
     }
 
-    /// 已发起的响应。Drop 时自动关闭句柄；body 用 [`Response::read`] 流式读。
-    pub struct Response(i32);
+    /// 已发起的响应。body 用 [`Response::read`] 流式读。
+    pub struct Response {
+        status: u16,
+        url: String,
+        headers: Vec<(String, String)>,
+        reader: RefCell<Box<dyn BufRead + Send>>,
+    }
 
     impl Response {
-        /// 发起请求。网络层失败（连接拒绝等）返回 Err；HTTP 错误码不算失败。
+        /// 发起请求。网络层失败返回 Err；HTTP 4xx/5xx 照常返回 Response。
         pub fn send(req: &Request) -> anyhow::Result<Self> {
-            let spec = req.to_json();
-            let handle = unsafe { host::rmus_http_open(spec.as_ptr(), spec.len() as u32) };
-            if handle < 0 {
-                anyhow::bail!("http {} {} 失败", req.method, req.url);
+            let mut request = HTTP_AGENT.request(&req.method, &req.url);
+            for (k, v) in &req.headers {
+                request = request.set(k, v);
             }
-            Ok(Response(handle))
+            let response = match req.body.as_deref() {
+                Some(body) => request.send_string(body),
+                None => request.call(),
+            };
+            let response = match response {
+                Ok(r) => r,
+                Err(ureq::Error::Status(_, r)) => r,
+                Err(e) => anyhow::bail!("http {} {} 失败: {e}", req.method, req.url),
+            };
+            let status = response.status();
+            let url = response.get_url().to_string();
+            let headers = response
+                .headers_names()
+                .into_iter()
+                .filter_map(|name| {
+                    response
+                        .header(&name)
+                        .map(|v| (name.to_ascii_lowercase(), v.to_string()))
+                })
+                .collect();
+            Ok(Self {
+                status,
+                url,
+                headers,
+                reader: RefCell::new(Box::new(BufReader::new(response.into_reader()))),
+            })
         }
 
         pub fn status(&self) -> u16 {
-            unsafe { host::rmus_http_status(self.0).max(0) as u16 }
+            self.status
         }
 
         /// 重定向跟随后的最终 URL。
         pub fn url(&self) -> String {
-            super::read_into_host(|out, cap| unsafe { host::rmus_http_url(self.0, out, cap) })
-                .unwrap_or_default()
+            self.url.clone()
         }
 
         pub fn header(&self, name: &str) -> Option<String> {
-            let name = name.to_string();
-            super::read_into_host(|out, cap| unsafe {
-                host::rmus_http_header(self.0, name.as_ptr(), name.len() as u32, out, cap)
-            })
+            let key = name.to_ascii_lowercase();
+            self.headers
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v.clone())
         }
 
         /// 读一段 body；返回 0 表示 EOF。
         pub fn read(&self, buf: &mut [u8]) -> anyhow::Result<usize> {
-            let n = unsafe { host::rmus_http_read(self.0, buf.as_mut_ptr(), buf.len() as u32) };
-            if n < 0 {
-                anyhow::bail!("读 body 失败");
-            }
-            Ok(n as usize)
+            let n = std::io::Read::read(&mut *self.reader.borrow_mut(), buf)?;
+            Ok(n)
         }
 
         /// 读完整个 body（内存式；大文件请用 [`Response::read`] 流式）。
@@ -594,154 +465,221 @@ pub mod http {
             Ok(self)
         }
     }
+}
 
-    impl Drop for Response {
-        fn drop(&mut self) {
-            unsafe { host::rmus_http_close(self.0) };
+/// 持久化拉黑名单（`<data_dir>/blocked.json`）：用户手动删除原文件后自动记入，
+/// 所有推荐器（自动推荐 / rmus-fm / rmus-dj）共用同一份黑名单，不再重复下载。
+pub mod blocklist {
+    use std::collections::HashSet;
+    use std::path::{Path, PathBuf};
+
+    const SEPARATORS: [char; 7] = ['&', '、', '/', ',', '，', ';', '；'];
+
+    /// 归一化去重键（标题 + 排序后的歌手集，忽略空白与大小写）。
+    pub fn dedup_key(title: &str, artist: &str) -> String {
+        let norm = |s: &str| -> String {
+            s.chars()
+                .filter(|c| !c.is_whitespace())
+                .flat_map(char::to_lowercase)
+                .collect()
+        };
+        let t = norm(title);
+        let mut artists: Vec<String> = artist
+            .split(SEPARATORS)
+            .map(norm)
+            .filter(|a| !a.is_empty())
+            .collect();
+        artists.sort();
+        artists.dedup();
+        format!("{t}\0{}", artists.join("&"))
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Entry {
+        pub title: String,
+        pub artist: String,
+        pub at: u64,
+    }
+
+    fn file_path(data_dir: &Path) -> PathBuf {
+        data_dir.join("blocked.json")
+    }
+
+    /// 读取全部拉黑条目；文件缺失或损坏返回空表。
+    pub fn load_entries(data_dir: &Path) -> Vec<Entry> {
+        let Ok(text) = std::fs::read_to_string(file_path(data_dir)) else {
+            return Vec::new();
+        };
+        let Ok(serde_json::Value::Array(arr)) = serde_json::from_str(&text) else {
+            return Vec::new();
+        };
+        arr.into_iter()
+            .filter_map(|v| {
+                let title = v.get("title")?.as_str()?.trim().to_string();
+                let artist = v
+                    .get("artist")
+                    .and_then(|a| a.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                let at = v.get("at").and_then(|a| a.as_u64()).unwrap_or(0);
+                (!title.is_empty()).then_some(Entry { title, artist, at })
+            })
+            .collect()
+    }
+
+    /// 读取拉黑键集合（供推荐器快速去重）。
+    pub fn load_keys(data_dir: &Path) -> HashSet<String> {
+        load_entries(data_dir)
+            .into_iter()
+            .map(|e| dedup_key(&e.title, &e.artist))
+            .collect()
+    }
+
+    /// 追加一条拉黑记录（按归一化键去重，原子落盘）。
+    pub fn add(data_dir: &Path, title: &str, artist: &str) {
+        let title = title.trim();
+        if title.is_empty() {
+            return;
+        }
+        let artist = artist.trim();
+        let mut entries = load_entries(data_dir);
+        let key = dedup_key(title, artist);
+        if entries.iter().any(|e| dedup_key(&e.title, &e.artist) == key) {
+            return;
+        }
+        entries.push(Entry {
+            title: title.to_string(),
+            artist: artist.to_string(),
+            at: super::now_ms(),
+        });
+        let path = file_path(data_dir);
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let json_arr: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "title": e.title,
+                    "artist": e.artist,
+                    "at": e.at,
+                })
+            })
+            .collect();
+        if let Ok(text) = serde_json::to_string_pretty(&json_arr) {
+            let tmp = path.with_extension("json.tmp");
+            if std::fs::write(&tmp, text).is_ok() {
+                let _ = std::fs::rename(&tmp, &path);
+            }
         }
     }
 }
 
-/// 文件系统（宿主代理；写入目标应是 [`library_dir`] 之下）。
-///
-/// [`File`] 实现了 [`std::io::Read`]/[`Write`]/[`Seek`]（经宿主代理），
-/// lofty 这类需要 Read+Seek+Write 的库可以直接使用。
+/// 原生文件系统封装（写模式自动建父目录；实现 `lofty` 所需的 IO trait）。
 pub mod fs {
-    use super::host;
-    use std::io::SeekFrom;
+    use anyhow::Context;
+    use std::io::{Read, Seek, SeekFrom, Write};
+    use std::path::Path;
 
-    /// 文件句柄。Drop 时自动关闭（flush）。
-    pub struct File(i32);
+    /// 文件句柄，直接包装 `std::fs::File`。
+    pub struct File(std::fs::File);
 
     impl File {
-        /// 只写打开（create + truncate）。
+        /// 写打开（create + truncate，自动建父目录）。
         pub fn create(path: &str) -> anyhow::Result<Self> {
-            Self::open_mode(path, 0, "创建")
+            ensure_parent(path)?;
+            let f = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(path)
+                .with_context(|| format!("创建 {path} 失败"))?;
+            Ok(Self(f))
         }
 
         /// 只读打开。
         pub fn open(path: &str) -> anyhow::Result<Self> {
-            Self::open_mode(path, 1, "打开")
+            let f = std::fs::File::open(path).with_context(|| format!("打开 {path} 失败"))?;
+            Ok(Self(f))
         }
 
         /// 读写打开（不截断；lofty tag 就地修改用）。
         pub fn open_rw(path: &str) -> anyhow::Result<Self> {
-            Self::open_mode(path, 2, "打开")
-        }
-
-        fn open_mode(path: &str, mode: i32, action: &str) -> anyhow::Result<Self> {
-            let handle = unsafe { host::rmus_file_open(path.as_ptr(), path.len() as u32, mode) };
-            if handle < 0 {
-                anyhow::bail!("{action} {path} 失败");
-            }
-            Ok(File(handle))
+            ensure_parent(path)?;
+            let f = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .with_context(|| format!("打开 {path} 失败"))?;
+            Ok(Self(f))
         }
 
         pub fn write_all(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
-            let n = unsafe { host::rmus_file_write(self.0, bytes.as_ptr(), bytes.len() as u32) };
-            if n < 0 {
-                anyhow::bail!("写文件失败");
-            }
-            Ok(())
+            self.0.write_all(bytes).context("写文件失败")
         }
     }
 
-    impl std::io::Write for File {
+    fn ensure_parent(path: &str) -> anyhow::Result<()> {
+        if let Some(parent) = Path::new(path).parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("创建目录 {}", parent.display()))?;
+        }
+        Ok(())
+    }
+
+    impl Write for File {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            let n = unsafe { host::rmus_file_write(self.0, buf.as_ptr(), buf.len() as u32) };
-            if n < 0 {
-                return Err(std::io::Error::other("宿主写文件失败"));
-            }
-            Ok(n as usize)
+            self.0.write(buf)
         }
         fn flush(&mut self) -> std::io::Result<()> {
-            Ok(()) // 宿主侧 close（drop File）即落盘
+            self.0.flush()
         }
     }
 
-    impl std::io::Read for File {
+    impl Read for File {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            let n = unsafe { host::rmus_file_read(self.0, buf.as_mut_ptr(), buf.len() as u32) };
-            if n < 0 {
-                return Err(std::io::Error::other("宿主读文件失败"));
-            }
-            Ok(n as usize)
+            self.0.read(buf)
         }
     }
 
-    impl std::io::Seek for File {
+    impl Seek for File {
         fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-            let (off, whence) = match pos {
-                SeekFrom::Start(n) => (n as i64, 0),
-                SeekFrom::Current(n) => (n, 1),
-                SeekFrom::End(n) => (n, 2),
-            };
-            let p = unsafe { host::rmus_file_seek(self.0, off, whence) };
-            if p < 0 {
-                return Err(std::io::Error::other("宿主 seek 失败"));
-            }
-            Ok(p as u64)
+            self.0.seek(pos)
         }
     }
 
-    // lofty 的 FileLike 要求（Read + Write + Seek + Truncate + Length）：
-    // `lofty-io` feature 下为自家类型实现 lofty 的两个 IO trait，
-    // 插件即可把 SDK File 直接交给 lofty 做 tag 读写
     #[cfg(feature = "lofty-io")]
     impl lofty::io::Truncate for File {
         fn truncate(&mut self, new_len: u64) -> std::io::Result<()> {
-            let ok = unsafe { host::rmus_file_truncate(self.0, new_len as i64) };
-            if ok == 0 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "宿主 truncate 失败",
-                ));
-            }
-            Ok(())
+            self.0.set_len(new_len)
         }
     }
 
     #[cfg(feature = "lofty-io")]
     impl lofty::io::Length for File {
         fn len(&self) -> std::io::Result<u64> {
-            let len = unsafe { host::rmus_file_len(self.0) };
-            if len < 0 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "宿主取文件长度失败",
-                ));
-            }
-            Ok(len as u64)
-        }
-    }
-
-    impl Drop for File {
-        fn drop(&mut self) {
-            unsafe { host::rmus_file_close(self.0) };
+            Ok(self.0.metadata()?.len())
         }
     }
 
     pub fn exists(path: &str) -> bool {
-        unsafe { host::rmus_fs_exists(path.as_ptr(), path.len() as u32) != 0 }
+        Path::new(path).exists()
     }
 
     pub fn remove(path: &str) -> bool {
-        unsafe { host::rmus_fs_remove(path.as_ptr(), path.len() as u32) != 0 }
+        std::fs::remove_file(path).is_ok()
     }
 
     pub fn rename(from: &str, to: &str) -> bool {
-        unsafe {
-            host::rmus_fs_rename(from.as_ptr(), from.len() as u32, to.as_ptr(), to.len() as u32)
-                != 0
-        }
+        std::fs::rename(from, to).is_ok()
     }
 }
 
-/// v0 事件集：整数枚举，复杂载荷（键值字符串等）后续版本经共享内存传递。
-///
-/// 编码：`event = kind | (payload << 8)`——kind 低 8 位，payload 高 24 位
-/// （字符码点直接放 payload，CJK 也在 24 位内）。`TICK`/`ENTER` 的数值与
-/// 旧版枚举兼容。
+/// 插件事件编码：`kind | (payload << 8)`（与 `rmus::proto::plugin_key` 对齐）。
 pub mod event {
     pub const KIND_TICK: i32 = 1;
     pub const KIND_ENTER: i32 = 2;
@@ -749,14 +687,13 @@ pub mod event {
     pub const KIND_DOWN: i32 = 4;
     /// 普通字符键（payload = Unicode 码点）
     pub const KIND_CHAR: i32 = 5;
-    /// 空格键（独立 kind，便于当"确认/播放"用）
+    /// 空格键
     pub const KIND_SPACE: i32 = 6;
-    /// 后台任务事件（数据在 `last_event` 缓冲，SDK `task::last_event()` 取）
+    /// 后台任务 / daemon 事件（经 `task::last_event()` 取数据）
     pub const KIND_DATA: i32 = 7;
-    /// 退格键（无 payload）：输入态删一个字符
+    /// 退格键（无 payload）
     pub const KIND_BACKSPACE: i32 = 8;
-    /// 语义导航：跳到首项 / 末项 / 上半页 / 下半页。宿主在插件画布上
-    /// 把 gg、G、C-u、C-d 等映射成这些事件，插件不用自己解析按键。
+    /// 语义导航：跳到首项 / 末项 / 上半页 / 下半页
     pub const KIND_TOP: i32 = 9;
     pub const KIND_BOTTOM: i32 = 10;
     pub const KIND_HALF_UP: i32 = 11;
@@ -781,20 +718,9 @@ pub mod event {
     }
 }
 
-/// UI 组件表 v0：把组件渲染成带样式的行序列（SDK 侧纯计算，native 可测）。
-///
-/// 设计取向：**组件表是 SDK 的绘图库，不是宿主协议**——宿主只认
-/// "带样式的行"（`PluginLine`），组件在插件内存里展开成行再输出。
-/// 宿主渲染器按语义样式令牌上色（自动跟随主题）并负责截断兜底。
-///
-/// ```ignore
-/// use rmus_plugin_sdk::ui::{self, style};
-/// ui::header("搜索结果", "d 下载 · x 取消");
-/// ui::list_row("晴天 - 周杰伦", i == selected);
-/// ui::progress(received, total, "下载中", cols as usize);
-/// ```
+/// UI 组件库：把组件渲染成带语义样式令牌的行序列，写入当前线程的渲染缓冲。
 pub mod ui {
-    /// 语义样式令牌（宿主映射到主题色；未认识的令牌落回正文色）。
+    use super::runtime::{self, RenderLine, RenderSpan};
     use unicode_width::UnicodeWidthStr;
 
     pub mod style {
@@ -803,17 +729,11 @@ pub mod ui {
         pub const FAINT: &str = "faint";
         pub const ACCENT: &str = "accent";
         pub const DANGER: &str = "danger";
-        /// 成功/高品质（flac 标签、完成 ✓）。
         pub const OK: &str = "ok";
-        /// 成功加粗（完成 ✓）。
         pub const OK_BOLD: &str = "ok_bold";
-        /// 冷色弱化（来源标签）。
         pub const COOL: &str = "cool";
-        /// 失败加粗（✗）。
         pub const DANGER_BOLD: &str = "danger_bold";
-        /// 分隔线。
         pub const RULE: &str = "rule";
-        /// 进度条填充（成功色底、深色字）。
         pub const OK_BG: &str = "ok_bg";
     }
 
@@ -824,13 +744,18 @@ pub mod ui {
         pub text: String,
     }
 
-    /// 正文色片段。
     pub fn text(s: impl Into<String>) -> Span {
-        Span { style: style::BASE, text: s.into() }
+        Span {
+            style: style::BASE,
+            text: s.into(),
+        }
     }
-    /// 指定样式片段。
+
     pub fn span(style: &'static str, s: impl Into<String>) -> Span {
-        Span { style, text: s.into() }
+        Span {
+            style,
+            text: s.into(),
+        }
     }
 
     /// 按显示宽度截断（超宽加省略号；与宿主渲染器同款规则）。
@@ -856,7 +781,7 @@ pub mod ui {
         out
     }
 
-    /// 左对齐填充到宽度（列布局：先 fit 再补空格）。
+    /// 左对齐填充到宽度。
     pub fn pad_right(text: &str, w: usize) -> String {
         let mut out = fit(text, w);
         let width: usize = out.width();
@@ -864,7 +789,7 @@ pub mod ui {
         out
     }
 
-    /// 右对齐填充到宽度（时长/音质等右侧列）。
+    /// 右对齐填充到宽度。
     pub fn pad_left(text: &str, w: usize) -> String {
         let cut = fit(text, w);
         let width: usize = cut.width();
@@ -873,8 +798,7 @@ pub mod ui {
         out
     }
 
-    /// 结果表列布局（与 TUI 队列/音乐库同款：曲名永远保留，宽度不够
-    /// 时先砍专辑、再砍艺术家；极窄先砍时长）。
+    /// 结果表列布局（与 TUI 队列/音乐库同款）。
     #[derive(Debug, Clone, Copy)]
     pub struct Cols {
         pub index_x: u16,
@@ -889,13 +813,11 @@ pub mod ui {
         pub dur_w: u16,
     }
 
-    /// 按画布宽度算列（画布从 x=0 起，与宿主渲染行对齐）。
     pub fn columns(width: u16) -> Cols {
         let right = width;
         let index_x = 2;
         let index_w = 3;
         let title_x = index_x + index_w + 2;
-        // 宽度不够 40：时长整列让位
         let dur_w = if width >= 40 {
             7.min(width.saturating_sub(10)).max(4)
         } else {
@@ -936,34 +858,25 @@ pub mod ui {
         }
     }
 
-    /// 声明画布的选中行（画布行号，含表头等偏移）。宿主据此铺选中
-    /// 底色并驱动滚动投影；每帧 `render` 里都要调用（宿主在帧开始
-    /// 时清空上帧声明）。
+    /// 声明画布选中行（画布行号，含表头偏移）。
     pub fn set_selected(idx: usize) {
-        #[cfg(target_arch = "wasm32")]
-        unsafe {
-            super::host::rmus_set_selected(idx as i32);
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        let _ = idx;
+        runtime::CTX.with(|cell| {
+            if let Some(ctx) = cell.borrow_mut().as_mut() {
+                ctx.frame.selected = Some(idx);
+            }
+        });
     }
 
-    /// 声明当前列表的语义信息：总条数与选中下标（0 起）。宿主的顶栏
-    /// 计数、底栏 `n/N` 统计只认这个声明，不再拿画布行数凑数。
-    /// 每帧 `render` 里都要调用；`total = 0` 表示空列表。
+    /// 声明当前列表语义：总条数与选中下标（0 起）。
     pub fn set_list(total: usize, index: usize) {
-        #[cfg(target_arch = "wasm32")]
-        unsafe {
-            super::host::rmus_set_list(total as i32, index as i32);
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let _ = (total, index);
-        }
+        runtime::CTX.with(|cell| {
+            if let Some(ctx) = cell.borrow_mut().as_mut() {
+                ctx.frame.list = Some((total, index.min(total.saturating_sub(1))));
+            }
+        });
     }
 
-    /// 一个列表的光标与窗口状态。插件把选中下标和滚动位置都交给它，
-    /// 导航语义（上下/首尾/半页）与窗口计算只写一份。
+    /// 列表光标与窗口状态。
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
     pub struct ListState {
         pub selected: usize,
@@ -975,7 +888,6 @@ pub mod ui {
             Self::default()
         }
 
-        /// 夹紧到 `[0, len)`；空列表归零。
         pub fn clamp(&mut self, len: usize) {
             if len == 0 {
                 self.selected = 0;
@@ -1003,8 +915,6 @@ pub mod ui {
             self.selected = len.saturating_sub(1);
         }
 
-        /// 处理一个导航事件（`KIND_UP` / `KIND_BOTTOM` / …）；返回
-        /// true = 事件已被列表消费。
         pub fn handle(&mut self, event: i32, len: usize, page: usize) -> bool {
             let page = page.max(1);
             match super::event::kind(event) {
@@ -1023,9 +933,6 @@ pub mod ui {
             true
         }
 
-        /// 每帧绘制前调用：夹紧选中项、算窗口首行，并把画布选中行
-        /// （`header_rows` 是列表前的表头行数）与列表语义声明给宿主。
-        /// 返回窗口首行下标。
         pub fn prepare(&mut self, len: usize, height: usize, header_rows: usize) -> usize {
             self.clamp(len);
             let first = window(&mut self.scroll, self.selected, len, height);
@@ -1037,8 +944,6 @@ pub mod ui {
         }
     }
 
-    /// 列表窗口化：返回可视区首行下标，保证 `selected` 落在窗口内。
-    /// 插件画布自行滚动时用（画布高度 = `render` 的 `rows`）。
     pub fn window(scroll: &mut usize, selected: usize, len: usize, height: usize) -> usize {
         if len == 0 || height == 0 {
             *scroll = 0;
@@ -1056,9 +961,6 @@ pub mod ui {
         *scroll
     }
 
-    /// 下载进度条：把行内前 `filled` 个显示宽度的片段换成 `ok_bg`
-    /// 样式（跨界片段按显示宽度切开，前半进度后半正文）。`filled`
-    /// 为 0 或超出行宽时原样返回。
     pub fn paint_progress(spans: &[Span], filled: usize) -> Vec<Span> {
         if filled == 0 {
             return spans.to_vec();
@@ -1072,11 +974,13 @@ pub mod ui {
             }
             let total: usize = s.text.width();
             if used + total <= filled {
-                out.push(Span { style: style::OK_BG, text: s.text.clone() });
+                out.push(Span {
+                    style: style::OK_BG,
+                    text: s.text.clone(),
+                });
                 used += total;
                 continue;
             }
-            // 跨界：按显示宽度切文本
             let take = filled - used;
             let mut head = String::new();
             let mut w = 0usize;
@@ -1090,42 +994,40 @@ pub mod ui {
                     tail.push(ch);
                 }
             }
-            out.push(Span { style: style::OK_BG, text: head });
-            out.push(Span { style: s.style, text: tail });
+            out.push(Span {
+                style: style::OK_BG,
+                text: head,
+            });
+            out.push(Span {
+                style: s.style,
+                text: tail,
+            });
             used = filled;
         }
         out
     }
 
-    /// 输出一行（多段、带样式）。行首空位（列 x 坐标）用
-    /// [`pad_left`] 拼进首段文本实现——画布行是流式排列，没有绝对
-    /// 定位；`columns` 给出的列宽就是用来在插件侧拼行的。
+    /// 输出一行（多段、带样式）到当前线程渲染缓冲。
     pub fn print_line(spans: &[Span]) {
-        #[cfg(target_arch = "wasm32")]
-        {
-            let payload: Vec<serde_json::Value> = spans
-                .iter()
-                .map(|s| serde_json::json!({ "text": s.text, "style": s.style }))
-                .collect();
-            let line = serde_json::Value::Array(payload).to_string();
-            unsafe {
-                super::host::rmus_print_spans(line.as_ptr(), line.len() as u32);
+        runtime::CTX.with(|cell| {
+            if let Some(ctx) = cell.borrow_mut().as_mut() {
+                ctx.frame.lines.push(RenderLine {
+                    spans: spans
+                        .iter()
+                        .map(|s| RenderSpan {
+                            text: s.text.clone(),
+                            style: s.style.to_string(),
+                        })
+                        .collect(),
+                });
             }
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let _ = spans;
-        }
+        });
     }
 
-    /// 输出一行纯文本（单段正文色；`print_line` 的便捷形态）。
     pub fn print(s: &str) {
         print_line(&[text(s)]);
     }
 
-    // ---- 组件 ----
-
-    /// 标题行：左标题（strong）+ 右提示（faint）。
     pub fn header(title: &str, hint: &str) {
         print_line(&[
             span(style::STRONG, title),
@@ -1133,19 +1035,14 @@ pub mod ui {
         ]);
     }
 
-    /// 列表行：选中态加 `▸ ` 前缀并高亮，否则暗色 `  ` 前缀。
     pub fn list_row(row: &str, selected: bool) {
         if selected {
-            print_line(&[
-                span(style::ACCENT, "▸ "),
-                span(style::STRONG, row),
-            ]);
+            print_line(&[span(style::ACCENT, "▸ "), span(style::STRONG, row)]);
         } else {
             print_line(&[span(style::FAINT, "  "), text(row)]);
         }
     }
 
-    /// 带前缀的列表行（行号 / 来源标签等由插件自行拼装）。
     pub fn list_row_custom(prefix: &str, text: &str, selected: bool) {
         let (mark, body_style) = if selected {
             (span(style::ACCENT, format!("▸ {prefix}")), style::STRONG)
@@ -1155,12 +1052,10 @@ pub mod ui {
         print_line(&[mark, super::ui::span(body_style, text)]);
     }
 
-    /// 进度条：`label ▕▊▊▋..... 42%`（块字符按比例填充）。
     pub fn progress(received: u64, total: u64, label: &str, width: usize) {
         let pct = (received.min(total) * 100)
             .checked_div(total)
             .map_or(0, |p| p as usize);
-        // 条宽 = width - 标签与百分比的空间（粗略预算，宿主 fit 兜底）
         let bar_width = width.saturating_sub(label.chars().count() + 8).max(4);
         let filled = bar_width * pct / 100;
         let bar: String = "█".repeat(filled) + &"░".repeat(bar_width - filled);
@@ -1171,7 +1066,6 @@ pub mod ui {
         ]);
     }
 
-    /// 键位提示行：`(key, 说明)` 交替着色。
     pub fn hints(hints: &[(&str, &str)]) {
         let mut spans = Vec::with_capacity(hints.len() * 3);
         for (i, (key, desc)) in hints.iter().enumerate() {
@@ -1185,7 +1079,7 @@ pub mod ui {
     }
 }
 
-/// methods 数组的 JSON 拼接（`declare_plugin_manifest!` 内部用）。
+/// methods 数组的 JSON 拼接（`declare_native_plugin!` 内部用）。
 #[macro_export]
 #[doc(hidden)]
 macro_rules! methods_json {
@@ -1201,485 +1095,127 @@ macro_rules! methods_json {
     };
 }
 
-/// 声明插件 manifest 并导出宿主所需的全部 export。
-///
-/// UI 插件（自带视图，宿主提供按键/渲染通道）：
-///
-/// ```
-/// rmus_plugin_sdk::declare_plugin_manifest! {
-///     name: "hello", version: "0.2.0", ui: true,
-/// }
-/// ```
-///
-/// 方法插件（search/download 这类能力，无界面）——`handle` 是同模块里
-/// 用户定义的 `fn(&str, &serde_json::Value) -> Result<serde_json::Value, E>`（E: Display，如 String 或 anyhow::Error）：
-///
-/// ```
-/// fn handle(method: &str, _params: &serde_json::Value) -> Result<serde_json::Value, String> {
-///     Ok(serde_json::json!({}))
-/// }
-///
-/// rmus_plugin_sdk::declare_plugin_manifest! {
-///     name: "rmus-dl", version: "0.1.0", ui: false,
-///     methods: [("search", "call"), ("download", "task"), ("cancel", "call")],
-///     handle: handle,
-/// }
-/// ```
-///
-/// 混合形态可再带 `cli: "<名>"`（如 `cli: "dl"`）：manifest 追加
-/// `"cli":"<名>"` 字段，宣告一个命令行入口；配套在 `methods` 里声明
-/// `("cli", "task")` 方法，客户端把 `rmus -<名> <参数...>` 的参数经该方法
-/// 转发给插件（参数形状 `{"args":[...]}`，kind=task 走进度回包）。
-///
-/// 用在 crate 根；一个 crate 只能声明一次。
+/// 声明原生插件并生成 `pub fn plugin() -> rmus_plugin_sdk::NativePlugin`。
 #[macro_export]
-macro_rules! declare_plugin_manifest {
-    // UI 插件 + tab 注册（manifest 带 tab 字段，TUI tab 栏随插件动态增减）
-    (name: $name:literal, version: $ver:literal, ui: true, tab: $tab:literal $(,)?) => {
-        static MANIFEST: &str = concat!(
-            "{\"name\":\"", $name, "\",\"version\":\"", $ver,
-            "\",\"ui\":true,\"tab\":\"", $tab, "\",\"methods\":[]}"
-        );
-
-        #[unsafe(no_mangle)]
-        pub extern "C" fn manifest_ptr() -> *const u8 {
-            MANIFEST.as_ptr()
-        }
-
-        #[unsafe(no_mangle)]
-        pub extern "C" fn manifest_len() -> u32 {
-            MANIFEST.len() as u32
-        }
-    };
-
-    // 混合形态 + tab 注册
+macro_rules! declare_native_plugin {
+    // 混合形态 + tab 注册（无 CLI 入口，如播客）
     (
         name: $name:literal, version: $ver:literal, ui: true, tab: $tab:literal,
-        methods: $methods:tt, handle: $handle:path $(,)?
+        methods: $methods:tt, handle: $handle:path, update: $update:path, render: $render:path $(,)?
     ) => {
-        static MANIFEST: &str = concat!(
-            "{\"name\":\"", $name, "\",\"version\":\"", $ver,
-            "\",\"ui\":true,\"tab\":\"", $tab, "\",\"methods\":[",
-            $crate::methods_json!$methods,
-            "]}"
-        );
-
-        #[unsafe(no_mangle)]
-        pub extern "C" fn manifest_ptr() -> *const u8 {
-            MANIFEST.as_ptr()
-        }
-
-        #[unsafe(no_mangle)]
-        pub extern "C" fn manifest_len() -> u32 {
-            MANIFEST.len() as u32
-        }
-
-        #[unsafe(no_mangle)]
-        pub extern "C" fn load() {}
-
-        /// 请求缓冲：宿主经 alloc 拿指针写参数。单线程模型下复用一份。
-        static mut REQUEST: Vec<u8> = Vec::new();
-
-        #[unsafe(no_mangle)]
-        pub extern "C" fn alloc(len: i32) -> *mut u8 {
-            if len <= 0 {
-                return core::ptr::null_mut();
-            }
-            // 单线程假设（见模块文档）；static_mut_refs 规避用 addr_of_mut
-            let buf: &mut Vec<u8> = unsafe { &mut *core::ptr::addr_of_mut!(REQUEST) };
-            buf.clear();
-            buf.resize(len as usize, 0);
-            buf.as_mut_ptr()
-        }
-
-        /// 执行一个请求行。恰好发一个回包；返回非 0 = 异常失败（宿主直接报错）。
-        #[unsafe(no_mangle)]
-        pub extern "C" fn call(ptr: *const u8, len: i32) -> i32 {
-            if len < 0 {
-                return 1;
-            }
-            let bytes: &[u8] = unsafe {
-                let buf: &mut Vec<u8> = &mut *core::ptr::addr_of_mut!(REQUEST);
-                if ptr != buf.as_ptr() {
-                    return 1;
-                }
-                buf.get(..len as usize).unwrap_or(&[])
-            };
-            let run = || -> Result<(), String> {
-                let request: serde_json::Value =
-                    serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
-                let method = request
-                    .get("method")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let params = request.get("params").cloned().unwrap_or_default();
-                // 错误按 Display 转 String（String / anyhow::Error 都兼容）
-                let reply = match $handle(&method, &params) {
-                    Ok(result) => serde_json::json!({ "result": result }),
-                    Err(error) => serde_json::json!({ "error": error.to_string() }),
-                };
-                let line = serde_json::to_vec(&reply).map_err(|e| e.to_string())?;
-                $crate::send_reply(&line);
-                Ok(())
-            };
-            match run() {
-                Ok(()) => 0,
-                Err(_) => 1,
+        pub fn plugin() -> $crate::NativePlugin {
+            static MANIFEST: &str = concat!(
+                "{\"name\":\"", $name, "\",\"version\":\"", $ver,
+                "\",\"ui\":true,\"tab\":\"", $tab, "\",\"methods\":[",
+                $crate::methods_json!$methods,
+                "]}"
+            );
+            $crate::NativePlugin {
+                manifest: MANIFEST,
+                update: Some($update),
+                render: Some($render),
+                handle: $handle,
             }
         }
     };
 
-    // 混合形态 + tab 注册 + 命令行入口（manifest 带 cli 字段，见宏文档）
+    // 混合形态 + tab 注册 + 命令行入口（如 dl / fm / dj）
     (
         name: $name:literal, version: $ver:literal, ui: true, tab: $tab:literal,
-        cli: $cli:literal, methods: $methods:tt, handle: $handle:path $(,)?
+        cli: $cli:literal, methods: $methods:tt, handle: $handle:path, update: $update:path, render: $render:path $(,)?
     ) => {
-        static MANIFEST: &str = concat!(
-            "{\"name\":\"", $name, "\",\"version\":\"", $ver,
-            "\",\"ui\":true,\"tab\":\"", $tab,
-            "\",\"cli\":\"", $cli, "\",\"methods\":[",
-            $crate::methods_json!$methods,
-            "]}"
-        );
-
-        #[unsafe(no_mangle)]
-        pub extern "C" fn manifest_ptr() -> *const u8 {
-            MANIFEST.as_ptr()
-        }
-
-        #[unsafe(no_mangle)]
-        pub extern "C" fn manifest_len() -> u32 {
-            MANIFEST.len() as u32
-        }
-
-        #[unsafe(no_mangle)]
-        pub extern "C" fn load() {}
-
-        /// 请求缓冲：宿主经 alloc 拿指针写参数。单线程模型下复用一份。
-        static mut REQUEST: Vec<u8> = Vec::new();
-
-        #[unsafe(no_mangle)]
-        pub extern "C" fn alloc(len: i32) -> *mut u8 {
-            if len <= 0 {
-                return core::ptr::null_mut();
-            }
-            // 单线程假设（见模块文档）；static_mut_refs 规避用 addr_of_mut
-            let buf: &mut Vec<u8> = unsafe { &mut *core::ptr::addr_of_mut!(REQUEST) };
-            buf.clear();
-            buf.resize(len as usize, 0);
-            buf.as_mut_ptr()
-        }
-
-        /// 执行一个请求行。恰好发一个回包；返回非 0 = 异常失败（宿主直接报错）。
-        #[unsafe(no_mangle)]
-        pub extern "C" fn call(ptr: *const u8, len: i32) -> i32 {
-            if len < 0 {
-                return 1;
-            }
-            let bytes: &[u8] = unsafe {
-                let buf: &mut Vec<u8> = &mut *core::ptr::addr_of_mut!(REQUEST);
-                if ptr != buf.as_ptr() {
-                    return 1;
-                }
-                buf.get(..len as usize).unwrap_or(&[])
-            };
-            let run = || -> Result<(), String> {
-                let request: serde_json::Value =
-                    serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
-                let method = request
-                    .get("method")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let params = request.get("params").cloned().unwrap_or_default();
-                // 错误按 Display 转 String（String / anyhow::Error 都兼容）
-                let reply = match $handle(&method, &params) {
-                    Ok(result) => serde_json::json!({ "result": result }),
-                    Err(error) => serde_json::json!({ "error": error.to_string() }),
-                };
-                let line = serde_json::to_vec(&reply).map_err(|e| e.to_string())?;
-                $crate::send_reply(&line);
-                Ok(())
-            };
-            match run() {
-                Ok(()) => 0,
-                Err(_) => 1,
-            }
-        }
-    };
-
-    // UI 插件（不注册 tab）：只有渲染通道，待在「插件」清单里
-    (name: $name:literal, version: $ver:literal, ui: true $(,)?) => {
-        static MANIFEST: &str = concat!(
-            "{\"name\":\"", $name, "\",\"version\":\"", $ver,
-            "\",\"ui\":true,\"methods\":[]}"
-        );
-
-        #[unsafe(no_mangle)]
-        pub extern "C" fn manifest_ptr() -> *const u8 {
-            MANIFEST.as_ptr()
-        }
-
-        #[unsafe(no_mangle)]
-        pub extern "C" fn manifest_len() -> u32 {
-            MANIFEST.len() as u32
-        }
-    };
-
-    // 混合形态（不注册 tab）：UI 通道 + 方法通道
-    (
-        name: $name:literal, version: $ver:literal, ui: true,
-        methods: $methods:tt, handle: $handle:path $(,)?
-    ) => {
-        static MANIFEST: &str = concat!(
-            "{\"name\":\"", $name, "\",\"version\":\"", $ver,
-            "\",\"ui\":true,\"methods\":[",
-            $crate::methods_json!$methods,
-            "]}"
-        );
-
-        #[unsafe(no_mangle)]
-        pub extern "C" fn manifest_ptr() -> *const u8 {
-            MANIFEST.as_ptr()
-        }
-
-        #[unsafe(no_mangle)]
-        pub extern "C" fn manifest_len() -> u32 {
-            MANIFEST.len() as u32
-        }
-
-        #[unsafe(no_mangle)]
-        pub extern "C" fn load() {}
-
-        /// 请求缓冲：宿主经 alloc 拿指针写参数。单线程模型下复用一份。
-        static mut REQUEST: Vec<u8> = Vec::new();
-
-        #[unsafe(no_mangle)]
-        pub extern "C" fn alloc(len: i32) -> *mut u8 {
-            if len <= 0 {
-                return core::ptr::null_mut();
-            }
-            // 单线程假设（见模块文档）；static_mut_refs 规避用 addr_of_mut
-            let buf: &mut Vec<u8> = unsafe { &mut *core::ptr::addr_of_mut!(REQUEST) };
-            buf.clear();
-            buf.resize(len as usize, 0);
-            buf.as_mut_ptr()
-        }
-
-        /// 执行一个请求行。恰好发一个回包；返回非 0 = 异常失败（宿主直接报错）。
-        #[unsafe(no_mangle)]
-        pub extern "C" fn call(ptr: *const u8, len: i32) -> i32 {
-            if len < 0 {
-                return 1;
-            }
-            let bytes: &[u8] = unsafe {
-                let buf: &mut Vec<u8> = &mut *core::ptr::addr_of_mut!(REQUEST);
-                if ptr != buf.as_ptr() {
-                    return 1;
-                }
-                buf.get(..len as usize).unwrap_or(&[])
-            };
-            let run = || -> Result<(), String> {
-                let request: serde_json::Value =
-                    serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
-                let method = request
-                    .get("method")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let params = request.get("params").cloned().unwrap_or_default();
-                // 错误按 Display 转 String（String / anyhow::Error 都兼容）
-                let reply = match $handle(&method, &params) {
-                    Ok(result) => serde_json::json!({ "result": result }),
-                    Err(error) => serde_json::json!({ "error": error.to_string() }),
-                };
-                let line = serde_json::to_vec(&reply).map_err(|e| e.to_string())?;
-                $crate::send_reply(&line);
-                Ok(())
-            };
-            match run() {
-                Ok(()) => 0,
-                Err(_) => 1,
-            }
-        }
-    };
-
-    // 方法插件：call/alloc export + 回包缓冲 + 空 load（宿主 lifecycle 统一）
-    (
-        name: $name:literal, version: $ver:literal, ui: false,
-        methods: $methods:tt, handle: $handle:path $(,)?
-    ) => {
-        static MANIFEST: &str = concat!(
-            "{\"name\":\"", $name, "\",\"version\":\"", $ver,
-            "\",\"ui\":false,\"methods\":[",
-            $crate::methods_json!$methods,
-            "]}"
-        );
-
-        #[unsafe(no_mangle)]
-        pub extern "C" fn manifest_ptr() -> *const u8 {
-            MANIFEST.as_ptr()
-        }
-
-        #[unsafe(no_mangle)]
-        pub extern "C" fn manifest_len() -> u32 {
-            MANIFEST.len() as u32
-        }
-
-        #[unsafe(no_mangle)]
-        pub extern "C" fn load() {}
-
-        /// 请求缓冲：宿主经 alloc 拿指针写参数。单线程模型下复用一份。
-        static mut REQUEST: Vec<u8> = Vec::new();
-
-        #[unsafe(no_mangle)]
-        pub extern "C" fn alloc(len: i32) -> *mut u8 {
-            if len <= 0 {
-                return core::ptr::null_mut();
-            }
-            // 单线程假设（见模块文档）；static_mut_refs 规避用 addr_of_mut
-            let buf: &mut Vec<u8> = unsafe { &mut *core::ptr::addr_of_mut!(REQUEST) };
-            buf.clear();
-            buf.resize(len as usize, 0);
-            buf.as_mut_ptr()
-        }
-
-        /// 执行一个请求行。恰好发一个回包；返回非 0 = 异常失败（宿主直接报错）。
-        #[unsafe(no_mangle)]
-        pub extern "C" fn call(ptr: *const u8, len: i32) -> i32 {
-            if len < 0 {
-                return 1;
-            }
-            let bytes: &[u8] = unsafe {
-                let buf: &mut Vec<u8> = &mut *core::ptr::addr_of_mut!(REQUEST);
-                if ptr != buf.as_ptr() {
-                    return 1;
-                }
-                buf.get(..len as usize).unwrap_or(&[])
-            };
-            let run = || -> Result<(), String> {
-                let request: serde_json::Value =
-                    serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
-                let method = request
-                    .get("method")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let params = request.get("params").cloned().unwrap_or_default();
-                // 错误按 Display 转 String（String / anyhow::Error 都兼容）
-                let reply = match $handle(&method, &params) {
-                    Ok(result) => serde_json::json!({ "result": result }),
-                    Err(error) => serde_json::json!({ "error": error.to_string() }),
-                };
-                let line = serde_json::to_vec(&reply).map_err(|e| e.to_string())?;
-                $crate::send_reply(&line);
-                Ok(())
-            };
-            match run() {
-                Ok(()) => 0,
-                Err(_) => 1,
+        pub fn plugin() -> $crate::NativePlugin {
+            static MANIFEST: &str = concat!(
+                "{\"name\":\"", $name, "\",\"version\":\"", $ver,
+                "\",\"ui\":true,\"tab\":\"", $tab,
+                "\",\"cli\":\"", $cli, "\",\"methods\":[",
+                $crate::methods_json!$methods,
+                "]}"
+            );
+            $crate::NativePlugin {
+                manifest: MANIFEST,
+                update: Some($update),
+                render: Some($render),
+                handle: $handle,
             }
         }
     };
 }
 
 #[cfg(test)]
-mod manifest_tests {
-    fn cli_handle(_method: &str, _params: &serde_json::Value) -> Result<serde_json::Value, String> {
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn dummy_handle(_m: &str, _p: &serde_json::Value) -> Result<serde_json::Value, String> {
         Ok(serde_json::json!({}))
     }
+    fn dummy_update(_ev: i32) -> i32 {
+        0
+    }
+    fn dummy_render(_r: i32, _c: i32) {}
 
-    // cli 臂：manifest JSON 带上 cli 字段，方法表照常拼接
-    crate::declare_plugin_manifest! {
-        name: "rmus-dl", version: "0.3.2", ui: true, tab: "在线", cli: "dl",
+    declare_native_plugin! {
+        name: "demo", version: "0.1.0", ui: true, tab: "演示", cli: "demo",
         methods: [("search", "call"), ("cli", "task")],
-        handle: cli_handle,
+        handle: dummy_handle, update: dummy_update, render: dummy_render,
     }
 
     #[test]
-    fn manifest_cli_入口字段() {
-        assert_eq!(
-            MANIFEST,
-            "{\"name\":\"rmus-dl\",\"version\":\"0.3.2\",\"ui\":true,\"tab\":\"在线\",\"cli\":\"dl\",\"methods\":[{\"name\":\"search\",\"kind\":\"call\"},{\"name\":\"cli\",\"kind\":\"task\"}]}"
-        );
-        assert_eq!(manifest_len() as usize, MANIFEST.len());
-    }
-}
-
-#[cfg(test)]
-mod ui_tests {
-    use super::ui::{self, span, style};
-
-    #[test]
-    fn paint_progress_前段换底色_跨界切分() {
-        let spans = [
-            span(style::STRONG, "标题"),
-            span(style::FAINT, "  艺术家"),
-        ];
-        // 全覆盖第一段（"标题" 4 宽）：整段换 ok_bg
-        let out = ui::paint_progress(&spans, 4);
-        assert_eq!(out[0].style, style::OK_BG);
-        assert_eq!(out[0].text, "标题");
-        assert_eq!(out[1].style, style::FAINT);
-
-        // 跨界（5 宽：标题 4 + 空格 1）：第二段切开（第 1 个空格进进度段）
-        let out = ui::paint_progress(&spans, 5);
-        assert_eq!(out.len(), 3);
-        assert_eq!(out[1].style, style::OK_BG);
-        assert_eq!(out[1].text, " ");
-        assert_eq!(out[2].style, style::FAINT);
-        assert_eq!(out[2].text, " 艺术家");
-
-        // 0 宽 / 超宽：原样
-        assert_eq!(ui::paint_progress(&spans, 0).len(), 2);
-        assert_eq!(ui::paint_progress(&spans, 999).len(), 2);
+    fn native_manifest_parses_cleanly() {
+        let p = plugin();
+        let v: serde_json::Value = serde_json::from_str(p.manifest).unwrap();
+        assert_eq!(v["name"], "demo");
+        assert_eq!(v["tab"], "演示");
+        assert_eq!(v["cli"], "demo");
+        assert_eq!(v["methods"].as_array().unwrap().len(), 2);
     }
 
     #[test]
-    fn window_选中滚入窗口() {
-        let mut scroll = 0;
-        // 选中在窗口内：不动
-        assert_eq!(ui::window(&mut scroll, 2, 100, 10), 0);
-        // 选中下移超窗：翻页
-        assert_eq!(ui::window(&mut scroll, 15, 100, 10), 6);
-        // 选中上移超窗：贴顶
-        assert_eq!(ui::window(&mut scroll, 1, 100, 10), 1);
-        // 空列表归零
-        assert_eq!(ui::window(&mut scroll, 0, 0, 10), 0);
+    fn runtime_render_and_daemon_and_cancel() {
+        let cancel = runtime::CancelHandle::new();
+        let ctx = HostContext {
+            lib_dir: PathBuf::from("/tmp/lib"),
+            data_dir: PathBuf::from("/tmp/data"),
+            cancelled: cancel.clone(),
+            daemon_call: Some(Arc::new(|req| Ok(serde_json::json!({ "echo": req })))),
+            ..Default::default()
+        };
+        runtime::install_context(ctx);
+
+        assert_eq!(library_dir(), "/tmp/lib");
+        assert_eq!(data_dir(), "/tmp/data");
+
+        runtime::begin_render();
+        ui::header("标题", "提示");
+        ui::set_selected(2);
+        ui::set_list(10, 3);
+        let frame = runtime::take_render();
+        assert_eq!(frame.lines.len(), 1);
+        assert_eq!(frame.selected, Some(2));
+        assert_eq!(frame.list, Some((10, 3)));
+
+        let reply = daemon::status().unwrap();
+        assert_eq!(reply["echo"]["method"], "status");
+
+        runtime::set_current_call(Some(42));
+        assert!(!cancelled());
+        cancel.cancel(42);
+        assert!(cancelled());
+
+        runtime::clear_context();
     }
 
     #[test]
-    fn list_state_导航语义() {
-        use super::event::{encode, KIND_BOTTOM, KIND_DOWN, KIND_HALF_DOWN, KIND_HALF_UP, KIND_UP};
-        let mut l = ui::ListState::new();
-        assert!(l.handle(encode(KIND_DOWN, 0), 100, 10));
-        assert_eq!(l.selected, 1);
-        assert!(l.handle(encode(KIND_BOTTOM, 0), 100, 10));
-        assert_eq!(l.selected, 99);
-        assert!(l.handle(encode(KIND_UP, 0), 100, 10));
-        assert_eq!(l.selected, 98);
-        assert!(l.handle(encode(KIND_HALF_UP, 0), 100, 10));
-        assert_eq!(l.selected, 88);
-        assert!(l.handle(encode(KIND_HALF_DOWN, 0), 100, 10));
-        assert_eq!(l.selected, 98);
-        // 未知事件不消费
-        assert!(!l.handle(encode(super::event::KIND_CHAR, 'x' as i32), 100, 10));
-    }
-
-    #[test]
-    fn list_state_窗口与空列表() {
-        let mut l = ui::ListState::new();
-        l.selected = 25;
-        // 窗口跟随：选中项落到底部
-        assert_eq!(l.prepare(100, 10, 3), 16);
-        assert_eq!(l.scroll, 16);
-        // 列表缩短后夹紧
-        l.prepare(5, 10, 3);
-        assert_eq!(l.selected, 4);
-        // 空列表归零
-        l.prepare(0, 10, 3);
-        assert_eq!(l.selected, 0);
-        assert_eq!(l.scroll, 0);
+    fn blocklist_roundtrip_and_dedup() {
+        let dir = std::env::temp_dir().join(format!("rmus-blocklist-test-{}", now_ms()));
+        let _ = std::fs::remove_dir_all(&dir);
+        blocklist::add(&dir, "知否知否", "胡夏 / 郁可唯");
+        blocklist::add(&dir, "知否知否", "郁可唯&胡夏");
+        let entries = blocklist::load_entries(&dir);
+        assert_eq!(entries.len(), 1);
+        let keys = blocklist::load_keys(&dir);
+        assert!(keys.contains(&blocklist::dedup_key("知否知否", "胡夏、郁可唯")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

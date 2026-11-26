@@ -45,7 +45,15 @@ pub(super) fn save(
             "播放列表 {name} 已存在（覆盖请显式确认，或换个名字另存）"
         ));
     }
-    playlists.insert(name.to_string(), items.to_vec());
+    let clean: Vec<QueueItem> = items
+        .iter()
+        .cloned()
+        .map(|mut it| {
+            it.recommended = false;
+            it
+        })
+        .collect();
+    playlists.insert(name.to_string(), clean);
     Ok(())
 }
 
@@ -103,6 +111,7 @@ mod tests {
             artist: String::new(),
             album: String::new(),
             duration_ms: 0,
+            recommended: false,
         }
     }
 

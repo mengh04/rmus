@@ -1,0 +1,14 @@
+[package]
+name = "rmus-dl"
+version = "0.3.2"
+edition = "2024"
+description = "rmus 在线音乐源模块：酷我/酷狗搜索 + 下载"
+license = "MIT"
+publish = false
+
+[dependencies]
+rmus-plugin-sdk = { path = "../plugin-sdk", features = ["lofty-io"] }
+rmus-sources = { path = "../rmus-sources" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"

@@ -111,40 +111,20 @@ support 24-bit color.
 | `RMUS_COLOR=256` | Force the 256-color approximation |
 | `NO_COLOR=1` | Monochrome: hierarchy moves to reverse video, rules and bars to glyphs |
 
-## Plugins
+## Built-in Modules (Multi-Crate Workspace)
 
-rmusd hosts plugins: either wasm32 modules (wasmi, capabilities proxied by the
-host) or out-of-process executables speaking a small NDJSON protocol over
-stdio. The player itself stays capability-agnostic — it knows nothing about
-what a plugin does.
+All former plugins are compiled natively into `rmusd` as workspace crates under `crates/` (no WASM runtime or external plugin binaries required):
 
-- Discovery: `$XDG_DATA_HOME/rmus/plugins/*` (default `~/.local/share/rmus/plugins`),
-  `~/.config/rmus/plugins/*`, `$XDG_DATA_DIRS/*/rmus/plugins`; override with
-  `RMUS_PLUGIN_DIR` (colon-separated)
-- wasm plugins are handshaked in-process (manifest export); executables via
-  `--rmus-manifest`, then spawned long-lived as `--rmus-plugin` on first use;
-  sessions idle out after 10 minutes
-- Calls the manifest marks as `task` return a job number immediately and stream
-  progress to every client as `Event::Plugin`; `call` methods block up to 30s
+| Crate | TUI Tab | CLI Entry | Role |
+| --- | --- | --- | --- |
+| `crates/plugin-sdk` | — | — | Native plugin runtime context, UI canvas primitives, HTTP/FS/daemon RPC |
+| `crates/rmus-sources` | — | — | Shared online sources (kuwo / kugou), download pipeline, tag writing |
+| `crates/rmus-dl` | `在线` | `rmus -dl` | Online search & lossless download straight into `~/Music` |
+| `crates/rmus-podcast` | `播客` | — | iTunes directory search, RSS subscriptions, episode download & continuous playback |
+| `crates/rmus-fm` | `FM` | `rmus -fm` | Free-API recommendations (Deezer chart + artist top tracks) with scheduled worker |
+| `crates/rmus-dj` | `DJ` | `rmus -dj` | LLM taste-aware recommendations with profile rewriting, tombstones & scheduled worker |
 
-Plugins live in [rmus-plugins](https://github.com/mengh04/rmus-plugins):
-`rmus-dl` (online search + download via kuwo / kugou) and `rmus-podcast` (RSS
-subscriptions and episode playback). Build them there and drop the `.wasm`
-into the plugins directory, then restart `rmusd`:
-
-```
-cargo build --release --target wasm32-unknown-unknown
-mkdir -p ~/.local/share/rmus/plugins
-cp target/wasm32-unknown-unknown/release/rmus_dl.wasm ~/.local/share/rmus/plugins/rmus-dl.wasm
-```
-
-Then the TUI grows an `在线` tab: `/` searches, `d` downloads (progress in the
-duration column), `Enter` downloads and peek-plays when done, `x` cancels.
-Finished files are written straight into `~/Music` with full tags, where the
-library watcher picks them up automatically. Wire protocol details:
-[docs/plugins.md](docs/plugins.md).
-
-Detailed documentation is coming later.
+On the `在线` tab: `/` searches, `d` downloads (progress in the duration column), `x` cancels. Finished files are written straight into `~/Music` with full tags, where the library watcher picks them up automatically.
 
 ## Layout
 

@@ -20,6 +20,19 @@ pub fn draw(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         return;
     }
 
+    if let Mode::ConfirmDelete { label, .. } = &app.mode {
+        let prompt = format!(
+            " 永久删除原文件并拉黑《{}》？ [y 确认 / 其他键取消] ",
+            label
+        );
+        let line = Line::from(Span::styled(
+            fit(&prompt, area.width),
+            theme.style_chip(theme.bg, theme.danger),
+        ));
+        frame.render_widget(Paragraph::new(line), area);
+        return;
+    }
+
     // 右侧：模式提示 > 临时消息 > 统计。模式提示由当前状态推导，
     // 退出直通/visual 的那一帧就消失，不等消息 TTL。
     let chip = |text: &str, error: bool| -> Line<'static> {

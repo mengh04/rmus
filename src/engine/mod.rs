@@ -32,6 +32,7 @@ mod undo;
 use crate::proto::{Event, PlayState, RepeatMode, Reply, Request, StatusInfo};
 use anyhow::Result;
 use std::collections::{BTreeMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
@@ -46,6 +47,19 @@ use undo::Snapshot;
 /// position 事件推送节流间隔
 pub(super) const POSITION_EVENT_INTERVAL: Duration = Duration::from_millis(250);
 
+/// 自动推荐器一次性拉取的引擎快照（避免多次 RPC 竞态）。
+#[derive(Debug, Clone)]
+pub struct RecommendContext {
+    pub state: PlayState,
+    pub current: Option<usize>,
+    pub queue: Vec<QueueItem>,
+    pub playlists: BTreeMap<String, Vec<QueueItem>>,
+    pub repeat: RepeatMode,
+    pub random: bool,
+    pub peeking: bool,
+    pub auto_recommend: bool,
+}
+
 /// 引擎收到的所有消息（命令 + 解码线程回报）。
 pub enum ToEngine {
     Request {
@@ -58,6 +72,26 @@ pub enum ToEngine {
         id: u64,
         items: Vec<QueueItem>,
         reply: oneshot::Sender<Result<Reply, String>>,
+    },
+    /// daemon 层完成扫描后插到当前曲之后（不打断播放）
+    InsertNextScanned {
+        id: u64,
+        items: Vec<QueueItem>,
+        reply: oneshot::Sender<Result<Reply, String>>,
+    },
+    /// 自动推荐后台静默插入（标 `recommended = true`，不污染撤销栈，按路径去重）
+    InsertAuto {
+        items: Vec<QueueItem>,
+        after_current: bool,
+    },
+    /// 自动推荐器查询当前引擎快照
+    RecommendSnapshot {
+        reply: oneshot::Sender<RecommendContext>,
+    },
+    /// 永久删文件前的引擎清理：校验路径在库内、停播切下一首、从队列/全部播放列表/撤销栈摘除
+    PurgePath {
+        path: Option<PathBuf>,
+        reply: oneshot::Sender<Result<Option<QueueItem>, String>>,
     },
     /// daemon 层完成扫描后替换队列并从头播放
     OpenScanned {
@@ -108,6 +142,7 @@ pub struct Engine {
     playlists: BTreeMap<String, Vec<QueueItem>>,
     repeat: RepeatMode,
     random: bool,
+    auto_recommend: bool,
     state: PlayState,
     output: Output,
     decoder: Option<DecoderHandle>,
@@ -128,6 +163,8 @@ pub struct Engine {
     /// 队列改动的撤销 / 重做栈（`undo::push_history` 在每次改动前压入）
     undo: VecDeque<Snapshot>,
     redo: VecDeque<Snapshot>,
+    /// 本曲是否已上报过 TrackFinished（防止 EOF 后 start_track 重复上报）
+    track_recorded: bool,
 }
 
 impl Engine {
@@ -162,6 +199,7 @@ impl Engine {
             playlists: persisted.playlists,
             repeat: persisted.repeat.unwrap_or_default(),
             random: persisted.random.unwrap_or(false),
+            auto_recommend: persisted.auto_recommend.unwrap_or(true),
             state: PlayState::Stopped,
             output,
             decoder: None,
@@ -174,6 +212,7 @@ impl Engine {
             peek: None,
             undo: VecDeque::new(),
             redo: VecDeque::new(),
+            track_recorded: true,
             last_position_event: Instant::now() - POSITION_EVENT_INTERVAL, // 首个事件立即发
         })
     }
@@ -183,6 +222,7 @@ impl Engine {
             volume: Some(self.output.volume()),
             repeat: Some(self.repeat),
             random: Some(self.random),
+            auto_recommend: Some(self.auto_recommend),
             queue_name: self.queue_origin.clone(),
             current_index: self.queue.current,
             current_queue: self.queue.items.clone(),
@@ -218,6 +258,7 @@ impl Engine {
             track: self.queue.current.and_then(|i| self.queue.track_info(i)),
             repeat: self.repeat,
             random: self.random,
+            auto_recommend: self.auto_recommend,
             queue_name: self.queue_origin.clone(),
             queue_modified: self.queue_modified(),
             peeking: self.peek.is_some(),

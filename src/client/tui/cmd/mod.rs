@@ -52,6 +52,10 @@ pub const SPECS: &[Spec] = &[
         desc: "随机 on | off（缺省切换）",
     },
     Spec {
+        names: &["auto", "rec"],
+        desc: "自动推荐 on | off（缺省切换）",
+    },
+    Spec {
         names: &["add"],
         desc: "加入队列（整行为一个路径）",
     },
@@ -74,6 +78,10 @@ pub const SPECS: &[Spec] = &[
     Spec {
         names: &["rescan"],
         desc: "重建库索引",
+    },
+    Spec {
+        names: &["rm", "del"],
+        desc: "永久删除原文件并拉黑（需确认）",
     },
     Spec {
         names: &["help", "h"],

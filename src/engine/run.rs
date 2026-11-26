@@ -32,6 +32,67 @@ impl Engine {
                     self.emit(Event::QueueChanged);
                     let _ = reply.send(Ok(Reply::Added { added, skipped: 0 }));
                 }
+                Ok(ToEngine::InsertNextScanned { items, reply, .. }) => {
+                    let added = items.len();
+                    if added > 0 {
+                        self.push_history();
+                        let at = self
+                            .queue
+                            .current
+                            .map_or(0, |c| (c + 1).min(self.queue.items.len()));
+                        self.queue.items.splice(at..at, items);
+                        self.dirty = true;
+                        self.emit(Event::QueueChanged);
+                    }
+                    let _ = reply.send(Ok(Reply::Added { added, skipped: 0 }));
+                }
+                Ok(ToEngine::InsertAuto {
+                    items,
+                    after_current,
+                }) => {
+                    // 试听态下不插歌；按路径去重，不压撤销栈以免打乱用户的 u 操作
+                    if self.peek.is_some() || items.is_empty() {
+                        continue;
+                    }
+                    let fresh: Vec<_> = items
+                        .into_iter()
+                        .filter(|it| !self.queue.items.iter().any(|q| q.path == it.path))
+                        .map(|mut it| {
+                            it.recommended = true;
+                            it
+                        })
+                        .collect();
+                    if fresh.is_empty() {
+                        continue;
+                    }
+                    if after_current {
+                        let at = self
+                            .queue
+                            .current
+                            .map_or(0, |c| (c + 1).min(self.queue.items.len()));
+                        self.queue.items.splice(at..at, fresh);
+                    } else {
+                        self.queue.items.extend(fresh);
+                    }
+                    self.dirty = true;
+                    self.emit(Event::QueueChanged);
+                }
+                Ok(ToEngine::RecommendSnapshot { reply }) => {
+                    let _ = reply.send(super::RecommendContext {
+                        state: self.state,
+                        current: self.queue.current,
+                        queue: self.queue.items.clone(),
+                        playlists: self.playlists.clone(),
+                        repeat: self.repeat,
+                        random: self.random,
+                        peeking: self.peek.is_some(),
+                        auto_recommend: self.auto_recommend,
+                    });
+                }
+                Ok(ToEngine::PurgePath { path, reply }) => {
+                    let outcome = self.purge_path(path);
+                    let _ = reply.send(outcome);
+                }
                 Ok(ToEngine::OpenScanned { items, reply, .. }) => {
                     if items.is_empty() {
                         let _ = reply.send(Err("没有找到可播放的音频文件".into()));
@@ -113,5 +174,94 @@ impl Engine {
                 self.persist();
             }
         }
+    }
+
+    /// 永久删盘前的引擎清理：解析目标路径并校验在 `~/Music` 内，停播/切歌，
+    /// 从当前队列、全部播放列表与撤销/重做栈里摘除。
+    fn purge_path(
+        &mut self,
+        path: Option<std::path::PathBuf>,
+    ) -> Result<Option<super::queue::QueueItem>, String> {
+        let target = match path {
+            Some(p) => p,
+            None => match self.queue.current_item() {
+                Some(item) => item.path.clone(),
+                None => return Err("当前没有正在播放的曲子".into()),
+            },
+        };
+        let lib_root = std::fs::canonicalize(crate::library::root())
+            .map_err(|e| format!("无法访问音乐库目录：{e}"))?;
+        let canon = std::fs::canonicalize(&target)
+            .map_err(|_| format!("文件不存在：{}", target.display()))?;
+        if !canon.starts_with(&lib_root) || !canon.is_file() {
+            return Err("只能删除音乐库目录（~/Music）内的音频文件".into());
+        }
+
+        // 从当前队列移除所有命中项；若删到正在播的曲子，记下恢复位置
+        let mut matched: Option<super::queue::QueueItem> = None;
+        let mut removed_current = false;
+        let mut resume_at: Option<usize> = None;
+        let mut idx = 0;
+        while idx < self.queue.items.len() {
+            let same = self.queue.items[idx].path == target
+                || std::fs::canonicalize(&self.queue.items[idx].path)
+                    .is_ok_and(|c| c == canon);
+            if same {
+                if matched.is_none() {
+                    matched = Some(self.queue.items[idx].clone());
+                }
+                if self.queue.remove(idx) {
+                    removed_current = true;
+                    resume_at = Some(idx);
+                }
+            } else {
+                idx += 1;
+            }
+        }
+
+        // 从所有保存的播放列表摘除
+        let mut playlists_changed = false;
+        for items in self.playlists.values_mut() {
+            let before = items.len();
+            items.retain(|it| {
+                if it.path == target {
+                    if matched.is_none() {
+                        matched = Some(it.clone());
+                    }
+                    false
+                } else {
+                    true
+                }
+            });
+            if items.len() != before {
+                playlists_changed = true;
+            }
+        }
+
+        self.purge_history_path(&target);
+
+        if matched.is_some() || playlists_changed {
+            self.dirty = true;
+            self.emit(Event::QueueChanged);
+        }
+
+        if removed_current {
+            if self.queue.items.is_empty() {
+                self.finish_or_restore();
+            } else if self.state == PlayState::Stopped {
+                let at = resume_at
+                    .unwrap_or(0)
+                    .min(self.queue.items.len().saturating_sub(1));
+                self.queue.current = Some(at);
+            } else {
+                // 先杀旧解码器并无缝切到删除点的下一首（确保文件句柄彻底释放）
+                let at = resume_at
+                    .unwrap_or(0)
+                    .min(self.queue.items.len().saturating_sub(1));
+                self.start_track(at, 0, self.state == PlayState::Playing);
+            }
+        }
+
+        Ok(matched)
     }
 }
