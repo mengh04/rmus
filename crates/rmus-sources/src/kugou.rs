@@ -185,8 +185,10 @@ impl MusicSource for Kugou {
                 let cover_url = item
                     .trans_param
                     .and_then(|tp| tp.union_cover)
-                    .or(item.image)
-                    .map(|u| u.replace("{size}", "400"));
+                    .filter(|u| !u.trim().is_empty())
+                    .or_else(|| item.image.filter(|u| !u.trim().is_empty()))
+                    .map(|u| u.replace("{size}", "400"))
+                    .filter(|u| u.starts_with("http://") || u.starts_with("https://"));
                 SearchResult {
                     title: item.song_name.clone().unwrap_or_else(|| {
                         item.file_name.clone().unwrap_or_else(|| item.file_hash.clone())
@@ -266,7 +268,11 @@ impl MusicSource for Kugou {
             });
 
         let cover_url = song.cover_url.clone();
-        Ok(SongMetadata { lyric, cover_url })
+        Ok(SongMetadata {
+            lyric,
+            cover_url,
+            fallback_cover_url: None,
+        })
     }
 }
 

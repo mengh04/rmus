@@ -34,6 +34,10 @@ struct SearchItem {
     duration: Option<String>,
     /// 音质清单："level:ff,bitrate:2000,format:flac,size:52.83Mb;..."
     minfo: Option<String>,
+    /// 搜索接口自带的专辑封面短路径（如 `"120/50/26/402483447.jpg"`），
+    /// 比 `songinfoandlrc` 的 `songinfo.pic` 稳定得多（后者经常返回空串或歌手头像）。
+    #[serde(rename = "web_albumpic_short")]
+    web_albumpic_short: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -130,13 +134,17 @@ impl MusicSource for Kuwo {
                     None => None,
                 };
                 let size_bytes = quality.and_then(|q| if q.flac { q.flac_size } else { None });
+                let cover_url = item
+                    .web_albumpic_short
+                    .as_deref()
+                    .and_then(album_cover_from_short);
                 Some(SearchResult {
                     title: item.name.clone().unwrap_or_default(),
                     artist: item.artist,
                     album: item.album,
                     song_id: rid,
                     source: "kuwo",
-                    cover_url: None,
+                    cover_url,
                     duration_ms: item
                         .duration
                         .and_then(|d| d.parse::<u64>().ok())
@@ -177,11 +185,24 @@ impl MusicSource for Kuwo {
                                 .collect::<Vec<_>>()
                                 .join("\r\n")
                         });
-                        let cover_url =
+                        let songinfo_pic =
                             data.songinfo.and_then(|info| info.pic).filter(|pic| {
                                 pic.starts_with("http://") || pic.starts_with("https://")
                             });
-                        return Ok(SongMetadata { lyric, cover_url });
+                        // 优先用搜索期拿到的 500x500 专辑图；songinfo.pic 作为备选（500 图 404 时兜底，
+                        // 或搜索未给短路径时使用），避免 songinfo.pic 间歇空串/返歌手头像导致丢封面。
+                        let (cover_url, fallback_cover_url) = match (song.cover_url.clone(), songinfo_pic) {
+                            (Some(primary), Some(backup)) if primary != backup => {
+                                (Some(primary), Some(backup))
+                            }
+                            (Some(primary), _) => (Some(primary), None),
+                            (None, backup) => (backup, None),
+                        };
+                        return Ok(SongMetadata {
+                            lyric,
+                            cover_url,
+                            fallback_cover_url,
+                        });
                     }
                     None => {
                         last_err =
@@ -196,6 +217,28 @@ impl MusicSource for Kuwo {
         }
         Err(last_err)
     }
+}
+
+/// 酷我搜索结果的 `web_albumpic_short`（如 `"120/50/26/402483447.jpg"`）→ 500x500 专辑图直链。
+fn album_cover_from_short(short: &str) -> Option<String> {
+    let s = short.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if s.starts_with("http://") || s.starts_with("https://") {
+        return Some(s.to_string());
+    }
+    let rest = s
+        .strip_prefix("120/")
+        .or_else(|| s.strip_prefix("240/"))
+        .or_else(|| s.strip_prefix("300/"))
+        .unwrap_or(s);
+    let path = if rest.starts_with("500/") {
+        rest.to_string()
+    } else {
+        format!("500/{rest}")
+    };
+    Some(format!("https://img1.kuwo.cn/star/albumcover/{path}"))
 }
 
 /// "123.45"（秒）→ "02:03.45"
@@ -217,5 +260,19 @@ mod tests {
         assert_eq!(super::to_lrc_time("0.0"), "00:00.00");
         assert_eq!(super::to_lrc_time("123.45"), "02:03.45");
         assert_eq!(super::to_lrc_time("2.25"), "00:02.25");
+    }
+
+    #[test]
+    fn album_cover_short_upgrades_to_500px() {
+        assert_eq!(
+            super::album_cover_from_short("120/50/26/402483447.jpg").as_deref(),
+            Some("https://img1.kuwo.cn/star/albumcover/500/50/26/402483447.jpg")
+        );
+        assert_eq!(
+            super::album_cover_from_short("120/s4s50/87/2390429506.jpg").as_deref(),
+            Some("https://img1.kuwo.cn/star/albumcover/500/s4s50/87/2390429506.jpg")
+        );
+        assert_eq!(super::album_cover_from_short(""), None);
+        assert_eq!(super::album_cover_from_short("   "), None);
     }
 }

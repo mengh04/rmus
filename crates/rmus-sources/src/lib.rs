@@ -145,13 +145,15 @@ pub struct SearchResult {
 pub struct SongMetadata {
     pub lyric: Option<String>,
     pub cover_url: Option<String>,
+    /// 主封面下载失败时的备选封面链接（例如酷我 500px 404 时退回 songinfo.pic）
+    pub fallback_cover_url: Option<String>,
 }
 
 impl SongMetadata {
-    /// 门禁：歌词和封面至少要拿到一样。
+    /// 门禁：必须拿到封面（纯音乐允许无歌词，但封面绝不可缺）。
     pub fn gate(&self) -> Result<()> {
-        if self.lyric.is_none() && self.cover_url.is_none() {
-            anyhow::bail!("metadata gate failed: neither lyric nor cover was resolved");
+        if self.cover_url.is_none() && self.fallback_cover_url.is_none() {
+            anyhow::bail!("metadata gate failed: cover art was not resolved");
         }
         Ok(())
     }
@@ -343,17 +345,42 @@ pub(crate) fn write_metadata(
         tag.insert_text(lyrics_key, lyric.clone());
     }
 
-    if let Some(cover_url) = &meta.cover_url {
-        let cover = http::Response::send(&http::Request::get(cover_url.clone()))
-            .context("封面下载失败")?
-            .error_for_status()?;
-        let cover_bytes = cover.read_to_end().context("封面读取失败")?;
-        let mut cursor = Cursor::new(cover_bytes);
-        let mut picture = Picture::from_reader(&mut cursor)?;
-        picture.set_pic_type(PictureType::CoverFront);
-        tag.remove_picture_type(PictureType::CoverFront);
-        tag.push_picture(picture);
+    // 封面是硬门禁：按主链接 → 备选链接顺序拉取并解码，全部失败则直接报错清理产物
+    let cover_urls: Vec<&str> = [
+        meta.cover_url.as_deref(),
+        meta.fallback_cover_url.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let mut picture_ok = None;
+    let mut last_cover_err = None;
+    for url in cover_urls {
+        let fetched = http::Response::send(&http::Request::get(url.to_string()))
+            .context("封面下载失败")
+            .and_then(|r| r.error_for_status().context("封面 HTTP 错误"))
+            .and_then(|r| r.read_to_end().context("封面读取失败"))
+            .and_then(|bytes| {
+                let mut cursor = Cursor::new(bytes);
+                Picture::from_reader(&mut cursor).context("封面解码失败")
+            });
+        match fetched {
+            Ok(mut pic) => {
+                pic.set_pic_type(PictureType::CoverFront);
+                picture_ok = Some(pic);
+                break;
+            }
+            Err(e) => last_cover_err = Some(e),
+        }
     }
+    let picture = match picture_ok {
+        Some(pic) => pic,
+        None => {
+            return Err(last_cover_err.unwrap_or_else(|| anyhow::anyhow!("封面缺失")));
+        }
+    };
+    tag.remove_picture_type(PictureType::CoverFront);
+    tag.push_picture(picture);
 
     // 就地保存（同一句柄；lofty rewind 后重写 tag 区）
     tagged_file
@@ -361,7 +388,7 @@ pub(crate) fn write_metadata(
         .context("lofty 保存失败")?;
     drop(file);
 
-    // 门禁复核：重新读文件（显式类型），确认要求写入的内容真的在 tag 里
+    // 门禁复核：重新读文件（显式类型），确认封面和基础标签真的在 tag 里
     let mut verified_input = fs::File::open(&path_str).map_err(anyhow::Error::msg)?;
     let verified = lofty::probe::Probe::new(&mut verified_input)
         .set_file_type(file_type)
@@ -372,7 +399,7 @@ pub(crate) fn write_metadata(
     if meta.lyric.is_some() && tag.get_string(lyrics_key).is_none() {
         anyhow::bail!("verification failed: LYRICS missing from tag after save");
     }
-    if meta.cover_url.is_some() && tag.pictures().is_empty() {
+    if tag.pictures().is_empty() {
         anyhow::bail!("verification failed: picture missing from tag after save");
     }
     if tag
@@ -423,6 +450,26 @@ mod tests {
         assert_eq!(normalize_artists("胡夏， 郁可唯"), "胡夏&郁可唯");
         assert_eq!(normalize_artists("郁可唯"), "郁可唯");
         assert_eq!(normalize_artists(""), "");
+    }
+
+    #[test]
+    fn metadata_gate_requires_cover_art() {
+        use super::SongMetadata;
+        // 仅有歌词没有封面 → 门禁拒绝
+        let lyric_only = SongMetadata {
+            lyric: Some("[00:00.00]test".into()),
+            cover_url: None,
+            fallback_cover_url: None,
+        };
+        assert!(lyric_only.gate().is_err());
+
+        // 有封面（即使纯音乐无歌词）→ 门禁放行
+        let with_cover = SongMetadata {
+            lyric: None,
+            cover_url: Some("https://img1.kuwo.cn/star/albumcover/500/a.jpg".into()),
+            fallback_cover_url: None,
+        };
+        assert!(with_cover.gate().is_ok());
     }
 }
 
